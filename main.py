@@ -1,31 +1,14 @@
-# Force non-interactive matplotlib backend BEFORE any library imports.
-# Without this, matplotlib (pulled in by scipy/numpy) tries to open a GUI
-# display on headless containers and hangs the process forever.
 import os
-os.environ.setdefault("MPLBACKEND", "Agg")
-
-import asyncio
 import io
-import logging
-import re
 import time
 from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, Query, Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from starlette.types import ASGIApp, Scope, Receive, Send
 
 from pipeline import run_contour_analysis_pipeline
 from schemas import ContourAnalysisResponse
-
-# Configure logging for container terminal visibility
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)-7s | %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-logger = logging.getLogger("csd-pond")
 
 # Initialize FastAPI application
 app = FastAPI(
@@ -41,25 +24,7 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# NormalizePathMiddleware uses re and starlette types imported at the top of this file
-
-# ASGI Middleware to automatically normalize multiple slashes (e.g., //analyzeContour -> /analyzeContour)
-class NormalizePathMiddleware:
-    def __init__(self, app: ASGIApp):
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send):
-        if scope["type"] in ("http", "websocket"):
-            path = scope.get("path", "")
-            cleaned = re.sub(r"/+", "/", path)
-            if cleaned != path:
-                scope["path"] = cleaned
-                if "raw_path" in scope:
-                    scope["raw_path"] = cleaned.encode("ascii")
-        await self.app(scope, receive, send)
-
-# Add Middlewares
-app.add_middleware(NormalizePathMiddleware)
+# Add CORS Middleware for accessibility from any client / frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -106,9 +71,7 @@ async def process_contour_analysis(
     """
     Core handler for analyzing contour maps and delineating catchment.
     """
-    # FastAPI's File(...) already enforces contour_map is required.
-    # Validate that the uploaded file has a filename (guards against edge cases).
-    if not contour_map.filename:
+    if not contour_map:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No file uploaded. Please upload a valid KML or KMZ contour map under the variable name 'contour_map'."
@@ -131,15 +94,8 @@ async def process_contour_analysis(
                 detail="Uploaded file is empty."
             )
 
-        file_size_mb = len(file_bytes) / (1024 * 1024)
-        logger.info(f"Received '{filename}' ({file_size_mb:.2f} MB) | resolution={resolution}m | top_n={top_n}")
-        t0 = time.time()
-
-        # Offload CPU-heavy pipeline to a thread pool so the async event loop
-        # stays responsive. Without this, the sync pipeline blocks the event
-        # loop and HTTP connections appear hung (proxies/clients time out).
-        result = await asyncio.to_thread(
-            run_contour_analysis_pipeline,
+        # Run terrain & catchment analysis pipeline
+        result = run_contour_analysis_pipeline(
             file_bytes=file_bytes,
             filename=filename,
             top_n=top_n,
@@ -147,9 +103,6 @@ async def process_contour_analysis(
             min_separation_meters=min_separation_meters,
             max_slope_degrees=max_slope_degrees
         )
-
-        elapsed = time.time() - t0
-        logger.info(f"Pipeline completed in {elapsed:.2f}s for '{filename}'")
 
         return ContourAnalysisResponse(**result)
 
@@ -174,7 +127,7 @@ async def process_contour_analysis(
 async def analyze_contour(
     contour_map: UploadFile = File(..., description="Uploaded KML or KMZ contour map file"),
     top_n: int = Query(5, ge=1, le=20, description="Number of top pond candidates to identify"),
-    resolution: float = Query(2.0, ge=0.5, le=10.0, description="DEM grid resolution in meters (default: 2.0m for fast container execution, use 1.0m for max resolution)"),
+    resolution: float = Query(1.0, ge=0.5, le=10.0, description="DEM grid resolution in meters (default: 1.0m)"),
     min_separation_meters: float = Query(150.0, ge=10.0, description="Minimum spatial distance between pond candidates"),
     max_slope_degrees: float = Query(8.0, ge=1.0, le=45.0, description="Maximum allowable slope for pond placement")
 ):
@@ -210,7 +163,7 @@ async def analyze_contour(
 async def find_catchment(
     contour_map: UploadFile = File(..., description="Uploaded KML or KMZ contour map file"),
     top_n: int = Query(5, ge=1, le=20, description="Number of top pond candidates to identify"),
-    resolution: float = Query(2.0, ge=0.5, le=10.0, description="DEM grid resolution in meters (default: 2.0m for fast container execution, use 1.0m for max resolution)"),
+    resolution: float = Query(1.0, ge=0.5, le=10.0, description="DEM grid resolution in meters (default: 1.0m)"),
     min_separation_meters: float = Query(150.0, ge=10.0, description="Minimum spatial distance between pond candidates"),
     max_slope_degrees: float = Query(8.0, ge=1.0, le=45.0, description="Maximum allowable slope for pond placement")
 ):
@@ -230,11 +183,4 @@ async def find_catchment(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "main:app",
-        host="0.0.0.0",
-        port=8000,
-        timeout_keep_alive=300,   # 5 min keep-alive for large file processing
-        timeout_notify=60,        # Grace period before worker kill
-        log_level="info"
-    )
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
