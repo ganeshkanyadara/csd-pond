@@ -276,10 +276,12 @@ def build_dem(projected_contours: List[Dict[str, Any]], resolution: float = 1.0)
 def calculate_slope(dem: np.ndarray, resolution: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Calculates topographic slope and aspect using Horn's 8-neighbor weighted algorithm.
+    Optimized for minimal memory allocation (lightweight float32 in-place operations).
     """
     padded_dem = np.pad(dem, pad_width=1, mode='edge')
+    inv_8res = np.float32(1.0 / (8.0 * resolution))
 
-    # 3x3 moving window neighbors
+    # 3x3 moving window neighbor slices
     a = padded_dem[:-2, :-2]   # South-West
     b = padded_dem[:-2, 1:-1]  # South
     c = padded_dem[:-2, 2:]    # South-East
@@ -289,17 +291,18 @@ def calculate_slope(dem: np.ndarray, resolution: float) -> Tuple[np.ndarray, np.
     h = padded_dem[2:, 1:-1]   # North
     i = padded_dem[2:, 2:]     # North-East
 
-    # Horn's 8-neighbor weighted gradients
-    dz_dx = ((c + 2.0 * f + i) - (a + 2.0 * d + g)) / (8.0 * resolution)
-    dz_dy = ((g + 2.0 * h + i) - (a + 2.0 * b + c)) / (8.0 * resolution)
+    # Horn's 8-neighbor weighted gradients (float32 operations)
+    dz_dx = ((c + np.float32(2.0) * f + i) - (a + np.float32(2.0) * d + g)) * inv_8res
+    dz_dy = ((g + np.float32(2.0) * h + i) - (a + np.float32(2.0) * b + c)) * inv_8res
 
-    slope_magnitude = np.sqrt(dz_dx**2 + dz_dy**2)
-    slope_radians = np.arctan(slope_magnitude)
-    slope_degrees = np.degrees(slope_radians)
-    slope_percent = np.tan(slope_radians) * 100.0
+    # Single-pass fast hypot to compute slope magnitude without temporary square arrays
+    slope_magnitude = np.hypot(dz_dx, dz_dy)
+    slope_degrees = np.rad2deg(np.arctan(slope_magnitude, out=slope_magnitude), out=slope_magnitude).astype(np.float32)
+    slope_percent = np.tan(np.deg2rad(slope_degrees)) * np.float32(100.0)
 
+    # Topographic Aspect (Compass bearing 0° - 360°)
     aspect_radians = np.arctan2(dz_dy, -dz_dx)
-    aspect_degrees = (90.0 - np.degrees(aspect_radians)) % 360.0
+    aspect_degrees = (np.float32(90.0) - np.rad2deg(aspect_radians, out=aspect_radians)) % np.float32(360.0)
 
     return slope_degrees, slope_percent, aspect_degrees
 
@@ -315,7 +318,7 @@ DIRECTIONS = [
 
 def calculate_flow_direction(dem: np.ndarray, resolution: float) -> np.ndarray:
     """
-    Vectorized D8 Steepest Downhill Direction Algorithm.
+    Vectorized D8 Steepest Downhill Direction Algorithm (optimized with float32 operations).
     """
     rows, cols = dem.shape
     distances = [
@@ -323,11 +326,12 @@ def calculate_flow_direction(dem: np.ndarray, resolution: float) -> np.ndarray:
         resolution,                          resolution,
         resolution * np.sqrt(2), resolution, resolution * np.sqrt(2)
     ]
+    inv_distances = [np.float32(1.0 / d) for d in distances]
 
     flow_direction = np.full((rows, cols), -1, dtype=np.int8)
-    max_slope = np.zeros((rows, cols), dtype=np.float64)
+    max_slope = np.zeros((rows, cols), dtype=np.float32)
 
-    for dir_idx, ((dr, dc), dist) in enumerate(zip(DIRECTIONS, distances)):
+    for dir_idx, ((dr, dc), inv_d) in enumerate(zip(DIRECTIONS, inv_distances)):
         nbr = np.full_like(dem, np.nan)
 
         r_src_start = max(0, dr)
@@ -342,7 +346,7 @@ def calculate_flow_direction(dem: np.ndarray, resolution: float) -> np.ndarray:
 
         nbr[r_dst_start:r_dst_end, c_dst_start:c_dst_end] = dem[r_src_start:r_src_end, c_src_start:c_src_end]
 
-        slope = (dem - nbr) / dist
+        slope = (dem - nbr) * inv_d
         steeper = slope > max_slope
         max_slope[steeper] = slope[steeper]
         flow_direction[steeper] = dir_idx
@@ -355,7 +359,7 @@ def calculate_flow_direction(dem: np.ndarray, resolution: float) -> np.ndarray:
 # --------------------------------------------------
 def calculate_flow_accumulation(dem: np.ndarray, flow_direction: np.ndarray, resolution: float) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Computes upstream accumulated flow runoff using O(N) topological queue routing.
+    Computes upstream accumulated flow runoff using ultra-fast wavefront topological routing.
     Also returns the 1D downstream adjacency array for fast catchment tracing.
     """
     rows, cols = dem.shape
@@ -363,38 +367,45 @@ def calculate_flow_accumulation(dem: np.ndarray, flow_direction: np.ndarray, res
 
     downstream = np.full(n_cells, -1, dtype=np.int32)
     flat_fd = flow_direction.ravel()
-    flat_r, flat_c = np.unravel_index(np.arange(n_cells), (rows, cols))
 
+    # Fast 1D neighbor offset calculation without creating 8.5M coordinate grids
     for d_idx, (dr, dc) in enumerate(DIRECTIONS):
         mask = (flat_fd == d_idx)
-        nr = flat_r[mask] + dr
-        nc = flat_c[mask] + dc
-        valid = (nr >= 0) & (nr < rows) & (nc >= 0) & (nc < cols)
-        target_1d = nr[valid] * cols + nc[valid]
-        src_1d = np.where(mask)[0][valid]
-        downstream[src_1d] = target_1d
+        if not np.any(mask):
+            continue
+        src = np.where(mask)[0]
+        r = src // cols
+        c = src % cols
+        valid = (r + dr >= 0) & (r + dr < rows) & (c + dc >= 0) & (c + dc < cols)
+        downstream[src[valid]] = (r[valid] + dr) * cols + (c[valid] + dc)
 
     in_degree = np.zeros(n_cells, dtype=np.int32)
     valid_ds = downstream[downstream >= 0]
     np.add.at(in_degree, valid_ds, 1)
 
-    flow_acc_flat = np.ones(n_cells, dtype=np.float64)
+    flow_acc_flat = np.ones(n_cells, dtype=np.float32)
 
-    # Batch-vectorized topological sort: processes all in_degree==0 cells in parallel
+    # Active wavefront: only process cells that currently have 0 incoming dependencies
     ready = np.where(in_degree == 0)[0]
 
     while len(ready) > 0:
         targets = downstream[ready]
-        valid_mask = targets >= 0
+        valid = targets >= 0
+        if not np.any(valid):
+            break
 
-        valid_sources = ready[valid_mask]
-        valid_targets = targets[valid_mask]
+        v_src = ready[valid]
+        v_dst = targets[valid]
 
-        np.add.at(flow_acc_flat, valid_targets, flow_acc_flat[valid_sources])
-        np.add.at(in_degree, valid_targets, -1)
-        in_degree[ready] = -1
+        np.add.at(flow_acc_flat, v_dst, flow_acc_flat[v_src])
+        np.add.at(in_degree, v_dst, -1)
 
-        ready = np.where(in_degree == 0)[0]
+        # Only scan destinations whose in_degree reached zero
+        zero_mask = in_degree[v_dst] == 0
+        if np.any(zero_mask):
+            ready = np.unique(v_dst[zero_mask])
+        else:
+            break
 
     return flow_acc_flat.reshape((rows, cols)), downstream
 
@@ -416,8 +427,7 @@ def find_top_ponds(
     resolution: float = 1.0
 ) -> List[Dict[str, Any]]:
     """
-    Multi-criteria suitability scoring (AHP) and Spatial Non-Maximum Suppression (NMS)
-    for identifying optimal pond candidates.
+    Lightweight multi-criteria suitability scoring (AHP) and Spatial NMS.
     """
     rows, cols = dem.shape
     border = max(1, int(50 / resolution))
@@ -443,18 +453,24 @@ def find_top_ponds(
     c_slope = slope_deg[cand_r, cand_c]
     c_elev = dem[cand_r, cand_c]
 
-    def normalize(arr: np.ndarray) -> np.ndarray:
-        return (arr - arr.min()) / (arr.max() - arr.min()) if arr.max() > arr.min() else np.zeros_like(arr)
+    def normalize_f32(arr: np.ndarray) -> np.ndarray:
+        mx, mn = float(arr.max()), float(arr.min())
+        return (arr - mn) / (mx - mn) if mx > mn else np.zeros_like(arr, dtype=np.float32)
 
-    norm_flow = normalize(c_flow)
-    norm_slope = normalize(c_slope)
-    norm_elev = normalize(c_elev)
+    norm_flow = normalize_f32(c_flow)
+    norm_slope = normalize_f32(c_slope)
+    norm_elev = normalize_f32(c_elev)
 
     # AHP Score: 60% Flow + 30% Flat Slope + 10% Low Elevation (from viz.ipynb)
     scores = (0.60 * norm_flow) + (0.30 * (1.0 - norm_slope)) + (0.10 * (1.0 - norm_elev))
 
-    sorted_indices = np.argsort(scores)[::-1]
+    # Fast top-pool partition instead of sorting millions of elements
+    pool_size = min(len(scores), 1000)
+    sorted_indices = np.argpartition(-scores, pool_size - 1)[:pool_size]
+    sorted_indices = sorted_indices[np.argsort(-scores[sorted_indices])]
+
     selected_ponds = []
+    min_sep_sq = min_separation_meters ** 2
 
     for idx in sorted_indices:
         r, c = cand_r[idx], cand_c[idx]
@@ -462,8 +478,7 @@ def find_top_ponds(
 
         too_close = False
         for prev in selected_ponds:
-            dist = np.sqrt((x - prev["x_m"])**2 + (y - prev["y_m"])**2)
-            if dist < min_separation_meters:
+            if (x - prev["x_m"])**2 + (y - prev["y_m"])**2 < min_sep_sq:
                 too_close = True
                 break
 
@@ -511,7 +526,7 @@ def delineate_catchments_and_geojson(
     rows, cols = dem.shape
     n_cells = rows * cols
 
-    # Fast CSR reverse upstream graph (replaces slow Python dictionary lookups)
+    # Fast CSR reverse upstream graph
     valid_src = np.where(downstream >= 0)[0]
     valid_dst = downstream[valid_src]
     order = np.argsort(valid_dst)
@@ -568,7 +583,7 @@ def delineate_catchments_and_geojson(
         }
         all_catchment_summaries.append(catchment_summary)
 
-        # For the Rank 1 pond, vectorize to GeoJSON (with fast row-span optimization)
+        # For the Rank 1 pond, vectorize to lightweight GeoJSON
         if pond["rank"] == 1:
             primary_catchment_info = catchment_summary
             c_rows, c_cols = np.where(mask)
@@ -588,11 +603,13 @@ def delineate_catchments_and_geojson(
                         boxes.append(box(grid_x[0, run[0]] - half, y_min, grid_x[0, run[-1]] + half, y_max))
 
             poly_utm = unary_union(boxes).buffer(0)
+            # Lightweight polygon simplification for ultra-fast GeoJSON export
+            poly_utm = poly_utm.simplify(tolerance=resolution * 0.25, preserve_topology=True)
 
             def to_wgs84(geom):
                 if geom.geom_type == "Polygon":
-                    ext = [list(transformer_inv.transform(x, y)) for x, y in geom.exterior.coords]
-                    holes = [[list(transformer_inv.transform(x, y)) for x, y in h.coords] for h in geom.interiors]
+                    ext = [[round(coord, 6) for coord in transformer_inv.transform(x, y)] for x, y in geom.exterior.coords]
+                    holes = [[[round(coord, 6) for coord in transformer_inv.transform(x, y)] for x, y in h.coords] for h in geom.interiors]
                     return {"type": "Polygon", "coordinates": [ext, *holes]}
                 elif geom.geom_type == "MultiPolygon":
                     polys = []
