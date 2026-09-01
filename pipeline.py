@@ -2,6 +2,7 @@ import io
 import json
 import math
 import os
+import re
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Any, Tuple, Optional
@@ -67,7 +68,6 @@ def parse_kml_or_kmz(file_bytes: bytes, filename: str) -> List[Dict[str, Any]]:
                 elevation = float(name.text.strip())
             except ValueError:
                 # Try extracting numbers from string e.g. "277 m"
-                import re
                 m = re.search(r"[-+]?\d*\.?\d+", name.text)
                 if m:
                     elevation = float(m.group(0))
@@ -565,7 +565,12 @@ def delineate_catchments_and_geojson(
                     holes = [[list(transformer_inv.transform(x, y)) for x, y in h.coords] for h in geom.interiors]
                     return {"type": "Polygon", "coordinates": [ext, *holes]}
                 elif geom.geom_type == "MultiPolygon":
-                    return {"type": "MultiPolygon", "coordinates": [to_wgs84(g)["coordinates"] for g in geom.geoms]}
+                    polys = []
+                    for g in geom.geoms:
+                        converted = to_wgs84(g)
+                        if converted:
+                            polys.append(converted["coordinates"])
+                    return {"type": "MultiPolygon", "coordinates": polys}
                 return None
 
             poly_wgs84 = to_wgs84(poly_utm)
@@ -716,7 +721,19 @@ def run_contour_analysis_pipeline(
         p_copy.pop("col", None)
         cleaned_top_ponds.append(p_copy)
 
+    # Validate that critical pipeline outputs are not None before building response
+    if not top_ponds:
+        raise ValueError("Could not find any suitable pond candidate site in the given terrain.")
+
     selected_pond = cleaned_top_ponds[0] if cleaned_top_ponds else None
+    if selected_pond is None:
+        raise ValueError("Pipeline produced no pond candidates after filtering.")
+
+    if primary_catchment is None:
+        raise ValueError("Failed to delineate catchment basin for the primary pond site.")
+
+    if geojson_doc is None:
+        raise ValueError("Failed to generate GeoJSON output for the catchment basin.")
 
     return {
         "status": "success",

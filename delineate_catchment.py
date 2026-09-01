@@ -138,7 +138,7 @@ hillshade = ls.hillshade(dem, vert_exag=2.0, dx=resolution, dy=resolution)
 
 plt.figure(figsize=(15, 11), facecolor="#0f141d")
 ax = plt.gca()
-ax.set_facecolor="#0f141d"
+ax.set_facecolor("#0f141d")
 
 # Hillshade base
 ax.imshow(hillshade, origin="lower", extent=extent, cmap="bone", alpha=0.55)

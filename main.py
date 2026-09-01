@@ -1,11 +1,13 @@
 import os
 import io
+import re
 import time
 from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, Query, Form, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.types import ASGIApp, Scope, Receive, Send
 
 from pipeline import run_contour_analysis_pipeline
 from schemas import ContourAnalysisResponse
@@ -24,8 +26,7 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-import re
-from starlette.types import ASGIApp, Scope, Receive, Send
+# NormalizePathMiddleware uses re and starlette types imported at the top of this file
 
 # ASGI Middleware to automatically normalize multiple slashes (e.g., //analyzeContour -> /analyzeContour)
 class NormalizePathMiddleware:
@@ -90,7 +91,9 @@ async def process_contour_analysis(
     """
     Core handler for analyzing contour maps and delineating catchment.
     """
-    if not contour_map:
+    # FastAPI's File(...) already enforces contour_map is required.
+    # Validate that the uploaded file has a filename (guards against edge cases).
+    if not contour_map.filename:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No file uploaded. Please upload a valid KML or KMZ contour map under the variable name 'contour_map'."
