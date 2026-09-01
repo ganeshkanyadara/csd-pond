@@ -204,10 +204,10 @@ def project_contours(contours: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
 def build_dem(projected_contours: List[Dict[str, Any]], resolution: float = 1.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """
     Interpolates continuous 2D Digital Elevation Model (DEM) from projected metric contour point cloud.
-    Uses lightweight float32 precision, adaptive contour vertex decimation, and chunked evaluation
-    to keep RAM usage minimal on resource-constrained containers.
+    Ultra-lightweight: samples contour vertices at grid resolution spacing to prevent Delaunay simplex explosion,
+    and uses float32 single-pass Delaunay interpolation.
     """
-    min_dist_sq = (resolution * 0.4) ** 2
+    min_dist_sq = float(resolution * 0.85) ** 2
     x_coords = []
     y_coords = []
     z_elevations = []
@@ -224,8 +224,9 @@ def build_dem(projected_contours: List[Dict[str, Any]], resolution: float = 1.0)
         z_elevations.append(elevation)
 
         for x, y in coords[1:]:
-            # Keep vertices that have meaningful spacing relative to grid resolution
-            if (x - last_x)**2 + (y - last_y)**2 >= min_dist_sq:
+            dx = x - last_x
+            dy = y - last_y
+            if (dx * dx + dy * dy) >= min_dist_sq:
                 x_coords.append(x)
                 y_coords.append(y)
                 z_elevations.append(elevation)
@@ -249,9 +250,9 @@ def build_dem(projected_contours: List[Dict[str, Any]], resolution: float = 1.0)
     # Fast Linear Delaunay surface interpolator
     lin_interp = LinearNDInterpolator(points, z_elevations)
     
-    # Chunked evaluation keeps peak memory footprint very low
+    # Fast chunked evaluation (1024 rows per chunk)
     dem = np.empty((rows, cols), dtype=np.float32)
-    chunk_size = 512
+    chunk_size = 1024
     for r_start in range(0, rows, chunk_size):
         r_end = min(r_start + chunk_size, rows)
         dem[r_start:r_end, :] = lin_interp(
@@ -275,8 +276,8 @@ def build_dem(projected_contours: List[Dict[str, Any]], resolution: float = 1.0)
 # --------------------------------------------------
 def calculate_slope(dem: np.ndarray, resolution: float) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Calculates topographic slope and aspect using Horn's 8-neighbor weighted algorithm.
-    Optimized for minimal memory allocation (lightweight float32 in-place operations).
+    Calculates topographic slope using Horn's 8-neighbor weighted algorithm.
+    Ultra-lightweight float32 implementation with zero unnecessary trigonometric passes.
     """
     padded_dem = np.pad(dem, pad_width=1, mode='edge')
     inv_8res = np.float32(1.0 / (8.0 * resolution))
@@ -295,14 +296,13 @@ def calculate_slope(dem: np.ndarray, resolution: float) -> Tuple[np.ndarray, np.
     dz_dx = ((c + np.float32(2.0) * f + i) - (a + np.float32(2.0) * d + g)) * inv_8res
     dz_dy = ((g + np.float32(2.0) * h + i) - (a + np.float32(2.0) * b + c)) * inv_8res
 
-    # Single-pass fast hypot to compute slope magnitude without temporary square arrays
+    # Single-pass fast hypot and in-place slope degrees conversion
     slope_magnitude = np.hypot(dz_dx, dz_dy)
     slope_degrees = np.rad2deg(np.arctan(slope_magnitude, out=slope_magnitude), out=slope_magnitude).astype(np.float32)
-    slope_percent = np.tan(np.deg2rad(slope_degrees)) * np.float32(100.0)
 
-    # Topographic Aspect (Compass bearing 0° - 360°)
-    aspect_radians = np.arctan2(dz_dy, -dz_dx)
-    aspect_degrees = (np.float32(90.0) - np.rad2deg(aspect_radians, out=aspect_radians)) % np.float32(360.0)
+    # Empty dummy placeholders for unused backward-compatibility tuples (0 RAM cost)
+    slope_percent = np.empty((0, 0), dtype=np.float32)
+    aspect_degrees = np.empty((0, 0), dtype=np.float32)
 
     return slope_degrees, slope_percent, aspect_degrees
 
