@@ -197,12 +197,13 @@ def project_contours(contours: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
     return projected_contours, coord_meta, transformer, transformer_inv
 
 
-# --------------------------------------------------
-# 3. 2D Surface Interpolation & DEM (from build_dem.py)
-# --------------------------------------------------
+from scipy.interpolate import LinearNDInterpolator
+from scipy.spatial import cKDTree
+
 def build_dem(projected_contours: List[Dict[str, Any]], resolution: float = 1.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """
     Interpolates continuous 2D Digital Elevation Model (DEM) from projected metric contour point cloud.
+    Uses memory-efficient single-pass Linear Delaunay interpolation with fast cKDTree boundary fill.
     """
     x_coords = []
     y_coords = []
@@ -228,13 +229,18 @@ def build_dem(projected_contours: List[Dict[str, Any]], resolution: float = 1.0)
     grid_x, grid_y = np.meshgrid(grid_x_1d, grid_y_1d)
 
     points = np.column_stack((x_coords, y_coords))
-    dem = griddata(points, z_elevations, (grid_x, grid_y), method="linear")
+    
+    # Fast single-pass Linear Delaunay interpolation
+    lin_interp = LinearNDInterpolator(points, z_elevations)
+    dem = lin_interp(grid_x, grid_y)
 
-    # Fill boundary extrapolation gaps (convex hull edges) with nearest neighbor (from build_dem.py)
+    # Fill boundary extrapolation gaps (convex hull edges) with fast cKDTree nearest-neighbor
     nan_mask = np.isnan(dem)
     if np.any(nan_mask):
-        dem_nearest = griddata(points, z_elevations, (grid_x[nan_mask], grid_y[nan_mask]), method="nearest")
-        dem[nan_mask] = dem_nearest
+        tree = cKDTree(points)
+        nan_pts = np.column_stack((grid_x[nan_mask], grid_y[nan_mask]))
+        _, idxs = tree.query(nan_pts, k=1, workers=-1)
+        dem[nan_mask] = z_elevations[idxs]
 
     return dem, grid_x, grid_y, resolution
 
@@ -320,11 +326,12 @@ def calculate_flow_direction(dem: np.ndarray, resolution: float) -> np.ndarray:
 
 
 # --------------------------------------------------
-# 6. Topological Queue Flow Accumulation (from calculate_flow_accumulation.py)
+# 6. Topological Queue Flow Accumulation & Downstream Graph
 # --------------------------------------------------
-def calculate_flow_accumulation(dem: np.ndarray, flow_direction: np.ndarray, resolution: float) -> np.ndarray:
+def calculate_flow_accumulation(dem: np.ndarray, flow_direction: np.ndarray, resolution: float) -> Tuple[np.ndarray, np.ndarray]:
     """
     Computes upstream accumulated flow runoff using O(N) topological queue routing.
+    Also returns the 1D downstream adjacency array for fast catchment tracing.
     """
     rows, cols = dem.shape
     n_cells = rows * cols
@@ -347,20 +354,24 @@ def calculate_flow_accumulation(dem: np.ndarray, flow_direction: np.ndarray, res
     np.add.at(in_degree, valid_ds, 1)
 
     flow_acc_flat = np.ones(n_cells, dtype=np.float64)
-    queue = np.where(in_degree == 0)[0].tolist()
 
-    q_idx = 0
-    while q_idx < len(queue):
-        curr = queue[q_idx]
-        q_idx += 1
-        nxt = downstream[curr]
-        if nxt >= 0:
-            flow_acc_flat[nxt] += flow_acc_flat[curr]
-            in_degree[nxt] -= 1
-            if in_degree[nxt] == 0:
-                queue.append(nxt)
+    # Batch-vectorized topological sort: processes all in_degree==0 cells in parallel
+    ready = np.where(in_degree == 0)[0]
 
-    return flow_acc_flat.reshape((rows, cols))
+    while len(ready) > 0:
+        targets = downstream[ready]
+        valid_mask = targets >= 0
+
+        valid_sources = ready[valid_mask]
+        valid_targets = targets[valid_mask]
+
+        np.add.at(flow_acc_flat, valid_targets, flow_acc_flat[valid_sources])
+        np.add.at(in_degree, valid_targets, -1)
+        in_degree[ready] = -1
+
+        ready = np.where(in_degree == 0)[0]
+
+    return flow_acc_flat.reshape((rows, cols)), downstream
 
 
 # --------------------------------------------------
@@ -460,7 +471,7 @@ def find_top_ponds(
 # --------------------------------------------------
 def delineate_catchments_and_geojson(
     dem: np.ndarray,
-    flow_direction: np.ndarray,
+    downstream: np.ndarray,
     slope_deg: np.ndarray,
     selected_ponds: List[Dict[str, Any]],
     grid_x: np.ndarray,
@@ -469,43 +480,42 @@ def delineate_catchments_and_geojson(
     transformer_inv: Transformer
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
     """
-    Traces upstream catchment from pour point, calculates watershed metrics,
-    and converts the basin boundary into a standard WGS84 GeoJSON FeatureCollection.
+    Traces upstream catchment from pour point using fast CSR reverse flow graph,
+    calculates watershed metrics, and converts the basin boundary into a standard WGS84 GeoJSON.
     """
     rows, cols = dem.shape
+    n_cells = rows * cols
 
-    # Build reverse upstream flow adjacency graph (from delineate_catchment.py)
-    upstream: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
-    for r in range(rows):
-        for c in range(cols):
-            d = flow_direction[r, c]
-            if d != -1:
-                dr, dc = DIRECTIONS[d]
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < rows and 0 <= nc < cols:
-                    if (nr, nc) not in upstream:
-                        upstream[(nr, nc)] = []
-                    upstream[(nr, nc)].append((r, c))
+    # Fast CSR reverse upstream graph (replaces slow Python dictionary lookups)
+    valid_src = np.where(downstream >= 0)[0]
+    valid_dst = downstream[valid_src]
+    order = np.argsort(valid_dst)
+    sorted_dst = valid_dst[order]
+    sorted_src = valid_src[order]
 
-    def trace_catchment(pour_r: int, pour_c: int) -> np.ndarray:
-        mask = np.zeros((rows, cols), dtype=bool)
-        stack = [(pour_r, pour_c)]
+    starts = np.searchsorted(sorted_dst, np.arange(n_cells), side='left')
+    ends = np.searchsorted(sorted_dst, np.arange(n_cells), side='right')
+
+    def trace_catchment_fast(pour_1d: int) -> np.ndarray:
+        visited = np.zeros(n_cells, dtype=bool)
+        stack = [pour_1d]
         while stack:
-            curr_r, curr_c = stack.pop()
-            if mask[curr_r, curr_c]:
+            curr = stack.pop()
+            if visited[curr]:
                 continue
-            mask[curr_r, curr_c] = True
-            for up_r, up_c in upstream.get((curr_r, curr_c), []):
-                stack.append((up_r, up_c))
-        return mask
+            visited[curr] = True
+            s, e = starts[curr], ends[curr]
+            if s < e:
+                stack.extend(sorted_src[s:e].tolist())
+        return visited.reshape((rows, cols))
 
     all_catchment_summaries = []
     primary_geojson: Optional[Dict[str, Any]] = None
     primary_catchment_info: Optional[Dict[str, Any]] = None
 
     for pond in selected_ponds:
-        p_r, p_c = pond["row"], pond["col"]
-        mask = trace_catchment(p_r, p_c)
+        pour_1d = pond["row"] * cols + pond["col"]
+        mask = trace_catchment_fast(pour_1d)
 
         cell_count = int(np.count_nonzero(mask))
         area_m2 = cell_count * (resolution ** 2)
@@ -533,16 +543,26 @@ def delineate_catchments_and_geojson(
         }
         all_catchment_summaries.append(catchment_summary)
 
-        # For the Rank 1 pond, vectorize to GeoJSON (from catchment_to_geojson.py)
+        # For the Rank 1 pond, vectorize to GeoJSON (with fast row-span optimization)
         if pond["rank"] == 1:
             primary_catchment_info = catchment_summary
             c_rows, c_cols = np.where(mask)
             half = resolution / 2.0
-            cell_boxes = [
-                box(grid_x[r, c] - half, grid_y[r, c] - half, grid_x[r, c] + half, grid_y[r, c] + half)
-                for r, c in zip(c_rows, c_cols)
-            ]
-            poly_utm = unary_union(cell_boxes).buffer(0)
+
+            # Merge contiguous horizontal spans in each row into single boxes
+            boxes = []
+            for r in np.unique(c_rows):
+                row_cols = c_cols[c_rows == r]
+                diffs = np.diff(row_cols)
+                split_pts = np.where(diffs > 1)[0] + 1
+                runs = np.split(row_cols, split_pts)
+                y_min = grid_y[r, 0] - half
+                y_max = grid_y[r, 0] + half
+                for run in runs:
+                    if len(run) > 0:
+                        boxes.append(box(grid_x[0, run[0]] - half, y_min, grid_x[0, run[-1]] + half, y_max))
+
+            poly_utm = unary_union(boxes).buffer(0)
 
             def to_wgs84(geom):
                 if geom.geom_type == "Polygon":
@@ -550,7 +570,12 @@ def delineate_catchments_and_geojson(
                     holes = [[list(transformer_inv.transform(x, y)) for x, y in h.coords] for h in geom.interiors]
                     return {"type": "Polygon", "coordinates": [ext, *holes]}
                 elif geom.geom_type == "MultiPolygon":
-                    return {"type": "MultiPolygon", "coordinates": [to_wgs84(g)["coordinates"] for g in geom.geoms]}
+                    polys = []
+                    for g in geom.geoms:
+                        converted = to_wgs84(g)
+                        if converted:
+                            polys.append(converted["coordinates"])
+                    return {"type": "MultiPolygon", "coordinates": polys}
                 return None
 
             poly_wgs84 = to_wgs84(poly_utm)
@@ -638,9 +663,9 @@ def run_contour_analysis_pipeline(
     flow_dir = calculate_flow_direction(dem, resolution)
     logger.info(f"[5/8] D8 flow direction computed in {time.time()-t0:.2f}s")
 
-    # 6. Flow Accumulation
+    # 6. Flow Accumulation & Downstream Graph
     t0 = time.time()
-    flow_acc = calculate_flow_accumulation(dem, flow_dir, resolution)
+    flow_acc, downstream = calculate_flow_accumulation(dem, flow_dir, resolution)
     logger.info(f"[6/8] Flow accumulation routed in {time.time()-t0:.2f}s")
 
     # 7. Pond Suitability & Selection
@@ -666,7 +691,7 @@ def run_contour_analysis_pipeline(
     t0 = time.time()
     primary_catchment, all_catchments, geojson_doc = delineate_catchments_and_geojson(
         dem=dem,
-        flow_direction=flow_dir,
+        downstream=downstream,
         slope_deg=slope_deg,
         selected_ponds=top_ponds,
         grid_x=grid_x,

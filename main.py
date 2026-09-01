@@ -1,6 +1,7 @@
 import os
 import io
 import time
+import asyncio
 import logging
 from typing import Optional
 
@@ -107,8 +108,9 @@ async def process_contour_analysis(
         logger.info(f"Received '{filename}' ({file_size_mb:.2f} MB) | resolution={resolution:.1f}m | top_n={top_n}")
         t_start = time.time()
 
-        # Run terrain & catchment analysis pipeline
-        result = run_contour_analysis_pipeline(
+        # Run terrain & catchment analysis pipeline in worker thread
+        result = await asyncio.to_thread(
+            run_contour_analysis_pipeline,
             file_bytes=file_bytes,
             filename=filename,
             top_n=top_n,
