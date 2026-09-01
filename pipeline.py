@@ -10,7 +10,8 @@ from typing import Dict, List, Any, Tuple, Optional
 
 import numpy as np
 from pyproj import Transformer
-from scipy.interpolate import griddata
+from scipy.interpolate import LinearNDInterpolator
+from scipy.spatial import cKDTree
 from shapely.geometry import box
 from shapely.ops import unary_union
 
@@ -197,44 +198,68 @@ def project_contours(contours: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
     return projected_contours, coord_meta, transformer, transformer_inv
 
 
-from scipy.interpolate import LinearNDInterpolator
-from scipy.spatial import cKDTree
-
+# --------------------------------------------------
+# 3. 2D Surface Interpolation & DEM (from build_dem.py)
+# --------------------------------------------------
 def build_dem(projected_contours: List[Dict[str, Any]], resolution: float = 1.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """
     Interpolates continuous 2D Digital Elevation Model (DEM) from projected metric contour point cloud.
-    Uses memory-efficient single-pass Linear Delaunay interpolation with fast cKDTree boundary fill.
+    Uses lightweight float32 precision, adaptive contour vertex decimation, and chunked evaluation
+    to keep RAM usage minimal on resource-constrained containers.
     """
+    min_dist_sq = (resolution * 0.4) ** 2
     x_coords = []
     y_coords = []
     z_elevations = []
 
     for contour in projected_contours:
-        elevation = contour["elevation"]
-        for x, y in contour["coordinates"]:
-            x_coords.append(x)
-            y_coords.append(y)
-            z_elevations.append(elevation)
+        elevation = float(contour["elevation"])
+        coords = contour["coordinates"]
+        if not coords:
+            continue
+        
+        last_x, last_y = coords[0]
+        x_coords.append(last_x)
+        y_coords.append(last_y)
+        z_elevations.append(elevation)
 
-    x_coords = np.array(x_coords, dtype=np.float64)
-    y_coords = np.array(y_coords, dtype=np.float64)
-    z_elevations = np.array(z_elevations, dtype=np.float64)
+        for x, y in coords[1:]:
+            # Keep vertices that have meaningful spacing relative to grid resolution
+            if (x - last_x)**2 + (y - last_y)**2 >= min_dist_sq:
+                x_coords.append(x)
+                y_coords.append(y)
+                z_elevations.append(elevation)
+                last_x, last_y = x, y
 
-    min_x, max_x = x_coords.min(), x_coords.max()
-    min_y, max_y = y_coords.min(), y_coords.max()
+    x_coords = np.array(x_coords, dtype=np.float32)
+    y_coords = np.array(y_coords, dtype=np.float32)
+    z_elevations = np.array(z_elevations, dtype=np.float32)
 
-    grid_x_1d = np.arange(min_x, max_x + resolution, resolution)
-    grid_y_1d = np.arange(min_y, max_y + resolution, resolution)
+    min_x, max_x = float(x_coords.min()), float(x_coords.max())
+    min_y, max_y = float(y_coords.min()), float(y_coords.max())
+
+    grid_x_1d = np.arange(min_x, max_x + resolution, resolution, dtype=np.float32)
+    grid_y_1d = np.arange(min_y, max_y + resolution, resolution, dtype=np.float32)
+    rows, cols = len(grid_y_1d), len(grid_x_1d)
 
     grid_x, grid_y = np.meshgrid(grid_x_1d, grid_y_1d)
 
     points = np.column_stack((x_coords, y_coords))
     
-    # Fast single-pass Linear Delaunay interpolation
+    # Fast Linear Delaunay surface interpolator
     lin_interp = LinearNDInterpolator(points, z_elevations)
-    dem = lin_interp(grid_x, grid_y)
+    
+    # Chunked evaluation keeps peak memory footprint very low
+    dem = np.empty((rows, cols), dtype=np.float32)
+    chunk_size = 512
+    for r_start in range(0, rows, chunk_size):
+        r_end = min(r_start + chunk_size, rows)
+        dem[r_start:r_end, :] = lin_interp(
+            grid_x[r_start:r_end, :],
+            grid_y[r_start:r_end, :]
+        )
 
-    # Fill boundary extrapolation gaps (convex hull edges) with fast cKDTree nearest-neighbor
+    # Fill boundary extrapolation gaps with fast cKDTree nearest-neighbor
     nan_mask = np.isnan(dem)
     if np.any(nan_mask):
         tree = cKDTree(points)
@@ -242,7 +267,7 @@ def build_dem(projected_contours: List[Dict[str, Any]], resolution: float = 1.0)
         _, idxs = tree.query(nan_pts, k=1, workers=-1)
         dem[nan_mask] = z_elevations[idxs]
 
-    return dem, grid_x, grid_y, resolution
+    return dem, grid_x, grid_y, float(resolution)
 
 
 # --------------------------------------------------
