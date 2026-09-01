@@ -24,7 +24,26 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Add CORS Middleware for accessibility from any client / frontend
+import re
+from starlette.types import ASGIApp, Scope, Receive, Send
+
+# ASGI Middleware to automatically normalize multiple slashes (e.g., //analyzeContour -> /analyzeContour)
+class NormalizePathMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] in ("http", "websocket"):
+            path = scope.get("path", "")
+            cleaned = re.sub(r"/+", "/", path)
+            if cleaned != path:
+                scope["path"] = cleaned
+                if "raw_path" in scope:
+                    scope["raw_path"] = cleaned.encode("ascii")
+        await self.app(scope, receive, send)
+
+# Add Middlewares
+app.add_middleware(NormalizePathMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
