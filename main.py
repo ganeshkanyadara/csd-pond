@@ -1,6 +1,7 @@
 import os
 import io
 import time
+import logging
 from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, Query, Form, HTTPException, status
@@ -9,6 +10,14 @@ from fastapi.responses import JSONResponse
 
 from pipeline import run_contour_analysis_pipeline
 from schemas import ContourAnalysisResponse
+
+# Configure logging format for terminal visibility
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("csd-pond")
 
 # Initialize FastAPI application
 app = FastAPI(
@@ -94,6 +103,10 @@ async def process_contour_analysis(
                 detail="Uploaded file is empty."
             )
 
+        file_size_mb = len(file_bytes) / (1024 * 1024)
+        logger.info(f"Received '{filename}' ({file_size_mb:.2f} MB) | resolution={resolution:.1f}m | top_n={top_n}")
+        t_start = time.time()
+
         # Run terrain & catchment analysis pipeline
         result = run_contour_analysis_pipeline(
             file_bytes=file_bytes,
@@ -103,6 +116,9 @@ async def process_contour_analysis(
             min_separation_meters=min_separation_meters,
             max_slope_degrees=max_slope_degrees
         )
+
+        total_elapsed = time.time() - t_start
+        logger.info(f"Pipeline completed in {total_elapsed:.2f}s for '{filename}'")
 
         return ContourAnalysisResponse(**result)
 

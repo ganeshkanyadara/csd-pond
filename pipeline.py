@@ -1,7 +1,9 @@
 import io
 import json
+import logging
 import math
 import os
+import time
 import zipfile
 import xml.etree.ElementTree as ET
 from typing import Dict, List, Any, Tuple, Optional
@@ -11,6 +13,8 @@ from pyproj import Transformer
 from scipy.interpolate import griddata
 from shapely.geometry import box
 from shapely.ops import unary_union
+
+logger = logging.getLogger("csd-pond")
 
 # --------------------------------------------------
 # 1. KML / KMZ Parsing (from parser.py)
@@ -609,25 +613,38 @@ def run_contour_analysis_pipeline(
     Executes full end-to-end terrain and catchment analysis pipeline on uploaded KML/KMZ file.
     """
     # 1. Parse KML / KMZ
+    t0 = time.time()
     contours = parse_kml_or_kmz(file_bytes, filename)
     total_points = sum(len(c["coordinates"]) for c in contours)
+    logger.info(f"[1/8] Parsed {len(contours)} contours ({total_points:,} points) in {time.time()-t0:.2f}s")
 
     # 2. Projection to UTM
+    t0 = time.time()
     projected_contours, coord_meta, transformer, transformer_inv = project_contours(contours)
+    logger.info(f"[2/8] UTM projection complete in {time.time()-t0:.2f}s")
 
     # 3. 2D Surface Interpolation / DEM
+    t0 = time.time()
     dem, grid_x, grid_y, resolution = build_dem(projected_contours, resolution=resolution)
+    logger.info(f"[3/8] DEM interpolated ({dem.shape[0]}x{dem.shape[1]} = {dem.size:,} cells) in {time.time()-t0:.2f}s")
 
     # 4. Horn's Slope and Aspect
+    t0 = time.time()
     slope_deg, slope_percent, aspect_deg = calculate_slope(dem, resolution)
+    logger.info(f"[4/8] Slope & aspect computed in {time.time()-t0:.2f}s")
 
     # 5. D8 Flow Direction
+    t0 = time.time()
     flow_dir = calculate_flow_direction(dem, resolution)
+    logger.info(f"[5/8] D8 flow direction computed in {time.time()-t0:.2f}s")
 
     # 6. Flow Accumulation
+    t0 = time.time()
     flow_acc = calculate_flow_accumulation(dem, flow_dir, resolution)
+    logger.info(f"[6/8] Flow accumulation routed in {time.time()-t0:.2f}s")
 
     # 7. Pond Suitability & Selection
+    t0 = time.time()
     top_ponds = find_top_ponds(
         dem=dem,
         slope_deg=slope_deg,
@@ -640,11 +657,13 @@ def run_contour_analysis_pipeline(
         max_slope_degrees=max_slope_degrees,
         resolution=resolution
     )
+    logger.info(f"[7/8] Found {len(top_ponds)} pond candidates in {time.time()-t0:.2f}s")
 
     if not top_ponds:
         raise ValueError("Could not find any suitable pond candidate site in the given terrain.")
 
     # 8. Delineate Catchment Basins & Export GeoJSON
+    t0 = time.time()
     primary_catchment, all_catchments, geojson_doc = delineate_catchments_and_geojson(
         dem=dem,
         flow_direction=flow_dir,
@@ -655,6 +674,7 @@ def run_contour_analysis_pipeline(
         resolution=resolution,
         transformer_inv=transformer_inv
     )
+    logger.info(f"[8/8] Catchment delineation & GeoJSON export done in {time.time()-t0:.2f}s")
 
     # Terrain Classification Summary (from calculate_slope.py)
     flat_cells = int(np.count_nonzero(slope_deg <= 3.0))
