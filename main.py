@@ -1,5 +1,12 @@
+# Force non-interactive matplotlib backend BEFORE any library imports.
+# Without this, matplotlib (pulled in by scipy/numpy) tries to open a GUI
+# display on headless containers and hangs the process forever.
 import os
+os.environ.setdefault("MPLBACKEND", "Agg")
+
+import asyncio
 import io
+import logging
 import re
 import time
 from typing import Optional
@@ -11,6 +18,14 @@ from starlette.types import ASGIApp, Scope, Receive, Send
 
 from pipeline import run_contour_analysis_pipeline
 from schemas import ContourAnalysisResponse
+
+# Configure logging for container terminal visibility
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-7s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("csd-pond")
 
 # Initialize FastAPI application
 app = FastAPI(
@@ -116,8 +131,15 @@ async def process_contour_analysis(
                 detail="Uploaded file is empty."
             )
 
-        # Run terrain & catchment analysis pipeline
-        result = run_contour_analysis_pipeline(
+        file_size_mb = len(file_bytes) / (1024 * 1024)
+        logger.info(f"Received '{filename}' ({file_size_mb:.2f} MB) | resolution={resolution}m | top_n={top_n}")
+        t0 = time.time()
+
+        # Offload CPU-heavy pipeline to a thread pool so the async event loop
+        # stays responsive. Without this, the sync pipeline blocks the event
+        # loop and HTTP connections appear hung (proxies/clients time out).
+        result = await asyncio.to_thread(
+            run_contour_analysis_pipeline,
             file_bytes=file_bytes,
             filename=filename,
             top_n=top_n,
@@ -125,6 +147,9 @@ async def process_contour_analysis(
             min_separation_meters=min_separation_meters,
             max_slope_degrees=max_slope_degrees
         )
+
+        elapsed = time.time() - t0
+        logger.info(f"Pipeline completed in {elapsed:.2f}s for '{filename}'")
 
         return ContourAnalysisResponse(**result)
 
@@ -205,4 +230,11 @@ async def find_catchment(
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=8000,
+        timeout_keep_alive=300,   # 5 min keep-alive for large file processing
+        timeout_notify=60,        # Grace period before worker kill
+        log_level="info"
+    )
