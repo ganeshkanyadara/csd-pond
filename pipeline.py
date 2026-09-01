@@ -196,9 +196,13 @@ def project_contours(contours: List[Dict[str, Any]]) -> Tuple[List[Dict[str, Any
 # --------------------------------------------------
 # 3. 2D Surface Interpolation & DEM (from build_dem.py)
 # --------------------------------------------------
+from scipy.interpolate import LinearNDInterpolator
+from scipy.spatial import cKDTree
+
 def build_dem(projected_contours: List[Dict[str, Any]], resolution: float = 1.0) -> Tuple[np.ndarray, np.ndarray, np.ndarray, float]:
     """
     Interpolates continuous 2D Digital Elevation Model (DEM) from projected metric contour point cloud.
+    Uses memory-efficient single-pass LinearNDInterpolator with cKDTree boundary fill.
     """
     x_coords = []
     y_coords = []
@@ -224,13 +228,18 @@ def build_dem(projected_contours: List[Dict[str, Any]], resolution: float = 1.0)
     grid_x, grid_y = np.meshgrid(grid_x_1d, grid_y_1d)
 
     points = np.column_stack((x_coords, y_coords))
-    dem = griddata(points, z_elevations, (grid_x, grid_y), method="linear")
+    
+    # Fast single-pass Linear Delaunay interpolation
+    lin_interp = LinearNDInterpolator(points, z_elevations)
+    dem = lin_interp(grid_x, grid_y)
 
-    # Fill boundary extrapolation gaps (convex hull edges) with nearest neighbor (from build_dem.py)
+    # Fill boundary extrapolation gaps (convex hull edges) with fast cKDTree nearest-neighbor
     nan_mask = np.isnan(dem)
     if np.any(nan_mask):
-        dem_nearest = griddata(points, z_elevations, (grid_x[nan_mask], grid_y[nan_mask]), method="nearest")
-        dem[nan_mask] = dem_nearest
+        tree = cKDTree(points)
+        nan_pts = np.column_stack((grid_x[nan_mask], grid_y[nan_mask]))
+        _, idxs = tree.query(nan_pts, k=1, workers=-1)
+        dem[nan_mask] = z_elevations[idxs]
 
     return dem, grid_x, grid_y, resolution
 

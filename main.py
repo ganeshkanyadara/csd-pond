@@ -146,7 +146,7 @@ async def process_contour_analysis(
 async def analyze_contour(
     contour_map: UploadFile = File(..., description="Uploaded KML or KMZ contour map file"),
     top_n: int = Query(5, ge=1, le=20, description="Number of top pond candidates to identify"),
-    resolution: float = Query(1.0, ge=0.5, le=10.0, description="DEM grid resolution in meters (default: 1.0m)"),
+    resolution: float = Query(2.0, ge=0.5, le=10.0, description="DEM grid resolution in meters (default: 2.0m for fast container execution, use 1.0m for max resolution)"),
     min_separation_meters: float = Query(150.0, ge=10.0, description="Minimum spatial distance between pond candidates"),
     max_slope_degrees: float = Query(8.0, ge=1.0, le=45.0, description="Maximum allowable slope for pond placement")
 ):
@@ -182,7 +182,7 @@ async def analyze_contour(
 async def find_catchment(
     contour_map: UploadFile = File(..., description="Uploaded KML or KMZ contour map file"),
     top_n: int = Query(5, ge=1, le=20, description="Number of top pond candidates to identify"),
-    resolution: float = Query(1.0, ge=0.5, le=10.0, description="DEM grid resolution in meters (default: 1.0m)"),
+    resolution: float = Query(2.0, ge=0.5, le=10.0, description="DEM grid resolution in meters (default: 2.0m for fast container execution, use 1.0m for max resolution)"),
     min_separation_meters: float = Query(150.0, ge=10.0, description="Minimum spatial distance between pond candidates"),
     max_slope_degrees: float = Query(8.0, ge=1.0, le=45.0, description="Maximum allowable slope for pond placement")
 ):
