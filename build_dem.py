@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 # --------------------------------------------------
 INPUT_FILE = "outputs/projected_contours.json"
 OUTPUT_FILE = "outputs/dem.npz"
-RESOLUTION = 1.0  # 1.0 meter grid spacing
+RESOLUTION = 1 # 1.0 meter grid spacing
 
 os.makedirs("outputs", exist_ok=True)
 

@@ -1,0 +1,475 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[margin=1in]{geometry}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{float}
+\usepackage{enumitem}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    filecolor=magenta,      
+    urlcolor=cyan,
+    pdftitle={csd-Assignment 1 - Phase 2: Pond Catchment Analysis Backend},
+}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\definecolor{backcolour}{rgb}{0.96,0.97,0.98}
+
+% Custom JSON language definition for listings
+\lstdefinelanguage{json}{
+    basicstyle=\ttfamily\scriptsize,
+    numbers=left,
+    numberstyle=\tiny\color{codegray},
+    stepnumber=1,
+    numbersep=6pt,
+    showstringspaces=false,
+    breaklines=true,
+    breakatwhitespace=false,
+    frame=single,
+    backgroundcolor=\color{backcolour},
+    literate=
+     *{0}{{{\color{codepurple}0}}}{1}
+      {1}{{{\color{codepurple}1}}}{1}
+      {2}{{{\color{codepurple}2}}}{1}
+      {3}{{{\color{codepurple}3}}}{1}
+      {4}{{{\color{codepurple}4}}}{1}
+      {5}{{{\color{codepurple}5}}}{1}
+      {6}{{{\color{codepurple}6}}}{1}
+      {7}{{{\color{codepurple}7}}}{1}
+      {8}{{{\color{codepurple}8}}}{1}
+      {9}{{{\color{codepurple}9}}}{1}
+      {:}{{{\color{codegray}{:}}}}{1}
+      {,}{{{\color{codegray}{,}}}}{1}
+      {\{}{{{\color{blue}{\{}}}}{1}
+      {\}}{{{\color{blue}{\}}}}}{1}
+      {[}{{{\color{blue}{[}}}}{1}
+      {]}{{{\color{blue}{]}}}}{1},
+}
+
+\begin{document}
+
+% ------------------------------------------------------------------------------
+% PAGE 1: HEADER, IDENTIFICATION, GITHUB REPO & WORKING API ROUTE URL
+% ------------------------------------------------------------------------------
+\begin{center}
+    {\LARGE \textbf{csd-Assignment 1 - Phase 2: Pond Catchment Analysis Backend}} \\[0.8em]
+    \rule{\linewidth}{1.2pt} \\[0.5em]
+    \begin{tabular}{ll}
+        \textbf{Name:} & k.ganesh babu \\
+        \textbf{ID:}   & 12341080 \\
+    \end{tabular}
+    \\[0.5em]
+    \rule{\linewidth}{0.5pt}
+\end{center}
+
+\vspace{1em}
+
+\section*{1. Project Repository \& Working API Endpoints}
+
+\subsection*{1.1 GitHub Repository}
+The complete backend source code, geospatial pipeline algorithms, FastAPI server, unit test suites, and container configurations are maintained at:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{GitHub Repository Link:} \url{https://github.com/ganeshkanyadara/csd-pond}
+\end{itemize}
+
+\subsection*{1.2 Working API Route URLs}
+The backend service is hosted and accessible via the following live API routes:
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{Primary Analysis Endpoint (POST):} \\
+    \texttt{http://<SERVER\_IP>:3000/analyzeContour} \quad \textit{(or port \texttt{8000})}
+    
+    \item \textbf{Alias Analysis Endpoint (POST):} \\
+    \texttt{http://<SERVER\_IP>:3000/findCatchment}
+    
+    \item \textbf{Interactive Swagger API Documentation (GET):} \\
+    \url{http://<SERVER_IP>:3000/docs}
+    
+    \item \textbf{ReDoc Interactive API Specification (GET):} \\
+    \url{http://<SERVER_IP>:3000/redoc}
+    
+    \item \textbf{Service Health Check (GET):} \\
+    \texttt{http://<SERVER\_IP>:3000/health}
+\end{itemize}
+
+\vspace{1.5em}
+\noindent\fbox{%
+\parbox{0.96\textwidth}{%
+    \textbf{System Overview:} \\
+    This automated geospatial backend processes contour maps in KML/KMZ formats, builds a continuous 2D Digital Elevation Model (DEM), calculates topographic slope via Horn's weighted gradient method, evaluates D8 downhill flow directions, accumulates upstream runoff drainage networks, ranks optimal farm pond candidates via Analytic Hierarchy Process (AHP) and Spatial Non-Maximum Suppression (NMS), and delineates exact watershed rainwater catchment boundaries outputted as standard GeoJSON.
+}%
+}
+
+\newpage
+
+% ------------------------------------------------------------------------------
+% PAGE 2: EXPLANATION OF CATCHMENT ESTIMATION APPROACH
+% ------------------------------------------------------------------------------
+\section{Catchment Estimation \& Terrain Analysis Approach}
+
+The backend implements an automated, mathematically rigorous 8-stage terrain intelligence pipeline for watershed catchment delineation and optimal farm pond siting:
+
+\subsection{1. KML/KMZ Parsing \& Metric Coordinate Projection}
+Contour lines and elevation metadata are extracted from XML placemark geometries. Geographic coordinates $(\text{Longitude}, \text{Latitude})$ are projected onto the local metric Universal Transverse Mercator (UTM) coordinate reference system (e.g., WGS 84 / UTM Zone 44N, EPSG:32644) to enable metric distance and area computations.
+
+\subsection{2. 2D Continuous Surface Interpolation (DEM Generation)}
+From the discrete metric contour point cloud, a continuous 2D Digital Elevation Model (DEM) raster grid $Z(x, y)$ is interpolated at metric resolution $\Delta x = \Delta y = \text{resolution}$ using 2D Delaunay Triangulated Irregular Network (TIN) linear surface interpolation with nearest-neighbor convex hull extrapolation.
+
+\subsection{3. Horn's 8-Neighbor Slope \& Aspect Algorithm}
+Terrain gradient vectors are computed over a moving $3 \times 3$ cell window using Horn's weighted partial difference equations:
+\begin{equation}
+\frac{\partial z}{\partial x} = \frac{(c + 2f + i) - (a + 2d + g)}{8 \cdot \Delta x}, \quad
+\frac{\partial z}{\partial y} = \frac{(g + 2h + i) - (a + 2b + c)}{8 \cdot \Delta y}
+\end{equation}
+\begin{equation}
+\text{Slope (degrees)} = \arctan\left(\sqrt{\left(\frac{\partial z}{\partial x}\right)^2 + \left(\frac{\partial z}{\partial y}\right)^2}\right) \times \frac{180}{\pi}
+\end{equation}
+
+\subsection{4. D8 Steepest Downhill Flow Direction Routing}
+For each cell $(r, c)$, runoff is routed to the neighbor $k \in \{0, \dots, 7\}$ exhibiting the steepest descent gradient:
+\begin{equation}
+S_k = \frac{Z(r, c) - Z(r + \Delta r_k, c + \Delta c_k)}{\text{Distance}_k}, \quad \text{FlowDir}(r, c) = \arg\max_k (S_k)
+\end{equation}
+
+\subsection{5. Topological Queue Flow Accumulation}
+Upstream contributing runoff area is accumulated along the Directed Acyclic Graph (DAG) using an $O(N)$ topological sorting queue based on in-degree dependencies:
+\begin{equation}
+\text{Acc}(v) = 1 + \sum_{u \in \text{Upstream}(v)} \text{Acc}(u)
+\end{equation}
+
+\subsection{6. Multi-Criteria Pond Candidate Selection (AHP + NMS)}
+Terrain cells meeting engineering criteria ($\text{Slope} \le 8^\circ$, $\text{FlowAcc} \ge 1000\text{ cells}$) are scored using Analytic Hierarchy Process (AHP) weighted multi-criteria decision analysis:
+\begin{equation}
+\text{Score} = 0.60 \cdot \text{Norm}(\text{FlowAcc}) + 0.30 \cdot (1 - \text{Norm}(\text{Slope})) + 0.10 \cdot (1 - \text{Norm}(\text{Elevation}))
+\end{equation}
+Spatial Non-Maximum Suppression (NMS) enforces a minimum Euclidean separation distance ($d \ge 150\text{ m}$) between candidates.
+
+\subsection{7. Upstream Watershed Catchment Basin Delineation}
+Taking the Rank-1 pond location as the pour point $(r_{\text{pour}}, c_{\text{pour}})$, the contributing drainage basin is delineated by executing a reverse-graph Depth-First Search (DFS) / Breadth-First Search (BFS) traversal along all upstream flow pathways. The binary watershed raster mask is converted to a vector polygon and projected into standard WGS84 GeoJSON.
+
+\newpage
+
+% ------------------------------------------------------------------------------
+% PAGE 3: DEMONSTRATION USING THE CONTOUR MAP
+% ------------------------------------------------------------------------------
+\section{Demonstration Using Provided Contour Map}
+
+\subsection{3.1 Postman API Request}
+The endpoint accepts \texttt{multipart/form-data} containing the KML contour file under the key \texttt{contour\_map} along with optional query parameters.
+
+\begin{figure}[H]
+    \centering
+    \IfFileExists{1.png}{%
+        \includegraphics[width=0.88\textwidth]{1.png}%
+    }{%
+        \fbox{\begin{minipage}{0.88\textwidth}
+            \centering
+            \vspace{3.5em}
+            \textit{[ Screenshot: Postman Sending POST Request with contours\_1m.kml (Upload 1.png to Overleaf) ]}
+            \vspace{3.5em}
+        \end{minipage}}%
+    }
+    \caption{Postman POST request to \texttt{/analyzeContour} with \texttt{contour\_map} upload.}
+    \label{fig:1}
+\end{figure}
+
+\subsection{3.2 Postman Success Response}
+The API returns a HTTP 200 OK status code with structured JSON containing full terrain statistics, candidate farm pond rankings, and standard GeoJSON FeatureCollection.
+
+\begin{figure}[H]
+    \centering
+    \IfFileExists{2.png}{%
+        \includegraphics[width=0.88\textwidth]{2.png}%
+    }{%
+        \fbox{\begin{minipage}{0.88\textwidth}
+            \centering
+            \vspace{3.5em}
+            \textit{[ Screenshot: Postman HTTP 200 OK JSON Response (Upload 2.png to Overleaf) ]}
+            \vspace{3.5em}
+        \end{minipage}}%
+    }
+    \caption{Postman success response showing catchment metrics and pond sites.}
+    \label{fig:2}
+\end{figure}
+
+\subsection{3.3 Delineated Catchment Area Visualization}
+The delineated rainwater catchment basin and optimal pond pour point overlaid on the terrain map are shown below:
+
+\begin{figure}[H]
+    \centering
+    \IfFileExists{3.png}{%
+        \includegraphics[width=0.88\textwidth]{3.png}%
+    }{%
+        \fbox{\begin{minipage}{0.88\textwidth}
+            \centering
+            \vspace{3.5em}
+            \textit{[ Screenshot: Delineated Catchment Area \& Pond Location Map (Upload 3.png to Overleaf) ]}
+            \vspace{3.5em}
+        \end{minipage}}%
+    }
+    \caption{Delineated upstream catchment basin boundary (watershed polygon) and optimal farm pond site.}
+    \label{fig:3}
+\end{figure}
+
+\newpage
+
+% ------------------------------------------------------------------------------
+% PAGE 4: API JSON RESPONSE SNIPPET
+% ------------------------------------------------------------------------------
+\subsection{3.4 Sample JSON Response Output}
+Below is the structured JSON response payload returned by the \texttt{/analyzeContour} endpoint:
+
+\begin{lstlisting}[language=json, caption={Structured JSON API Response Output}]
+{
+  "status": "success",
+  "file_info": {
+    "filename": "contours_1m.kml",
+    "file_size_bytes": 6710528,
+    "total_contours_parsed": 2711,
+    "total_contour_points": 160473
+  },
+  "coordinate_system": {
+    "source": "EPSG:4326",
+    "target": "EPSG:32644",
+    "projection": "UTM",
+    "utm_zone": 44,
+    "hemisphere": "north",
+    "units": "meters",
+    "center_lon": 81.29663,
+    "center_lat": 21.25188,
+    "bbox_wgs84": {
+      "min_lon": 81.281404,
+      "min_lat": 21.239822,
+      "max_lon": 81.312647,
+      "max_lat": 21.263581
+    }
+  },
+  "terrain_summary": {
+    "dem_dimensions": {
+      "rows": 2627,
+      "cols": 3243,
+      "total_cells": 8519361,
+      "resolution_meters": 1.0
+    },
+    "elevation_stats": {
+      "min_m": 30.0,
+      "max_m": 298.0,
+      "mean_m": 283.62,
+      "relief_m": 268.0
+    },
+    "slope_stats": {
+      "mean_degrees": 3.6,
+      "min_degrees": 0.0,
+      "max_degrees": 89.61,
+      "flat_terrain_pct": 49.61,
+      "gentle_terrain_pct": 43.61,
+      "steep_terrain_pct": 6.78
+    },
+    "flow_accumulation_stats": {
+      "max_accumulation_m2": 8450.0,
+      "mean_accumulation_m2": 23.76
+    }
+  },
+  "selected_pond": {
+    "rank": 1,
+    "latitude": 21.251917,
+    "longitude": 81.296668,
+    "x_m": 530780.5,
+    "y_m": 2350057.3,
+    "elevation_m": 270.0,
+    "slope_deg": 2.69,
+    "flow_accumulation_m2": 8276.0,
+    "suitability_score": 0.8738,
+    "google_maps_url": "https://www.google.com/maps?q=21.251917,81.296668"
+  },
+  "pond_candidates": [
+    {
+      "rank": 1,
+      "latitude": 21.251917,
+      "longitude": 81.296668,
+      "elevation_m": 270.0,
+      "slope_deg": 2.69,
+      "flow_accumulation_m2": 8276.0,
+      "suitability_score": 0.8738,
+      "google_maps_url": "https://www.google.com/maps?q=21.251917,81.296668"
+    },
+    {
+      "rank": 2,
+      "latitude": 21.256956,
+      "longitude": 81.303512,
+      "elevation_m": 287.0,
+      "slope_deg": 1.58,
+      "flow_accumulation_m2": 8450.0,
+      "suitability_score": 0.8651,
+      "google_maps_url": "https://www.google.com/maps?q=21.256956,81.303512"
+    },
+    {
+      "rank": 3,
+      "latitude": 21.259582,
+      "longitude": 81.300106,
+      "elevation_m": 274.0,
+      "slope_deg": 2.78,
+      "flow_accumulation_m2": 7809.0,
+      "suitability_score": 0.8175,
+      "google_maps_url": "https://www.google.com/maps?q=21.259582,81.300106"
+    },
+    {
+      "rank": 4,
+      "latitude": 21.246238,
+      "longitude": 81.28914,
+      "elevation_m": 269.0,
+      "slope_deg": 0.44,
+      "flow_accumulation_m2": 6219.0,
+      "suitability_score": 0.7962,
+      "google_maps_url": "https://www.google.com/maps?q=21.246238,81.289140"
+    },
+    {
+      "rank": 5,
+      "latitude": 21.257717,
+      "longitude": 81.297191,
+      "elevation_m": 280.0,
+      "slope_deg": 0.0,
+      "flow_accumulation_m2": 6415.0,
+      "suitability_score": 0.787,
+      "google_maps_url": "https://www.google.com/maps?q=21.257717,81.297191"
+    }
+  ],
+  "primary_catchment": {
+    "pond_rank": 1,
+    "pond_location": {
+      "latitude": 21.251917,
+      "longitude": 81.296668,
+      "elevation_m": 270.0
+    },
+    "catchment_area_m2": 8276.0,
+    "catchment_area_hectares": 0.8276,
+    "catchment_area_acres": 2.05,
+    "catchment_cell_count": 8276,
+    "elevation_min_m": 270.0,
+    "elevation_max_m": 287.78,
+    "elevation_mean_m": 280.01,
+    "slope_mean_deg": 6.11
+  },
+  "geojson": {
+    "type": "FeatureCollection",
+    "name": "Farm_Pond_Catchment_Delineation",
+    "features": [
+      {
+        "type": "Feature",
+        "properties": {
+          "feature_type": "catchment_basin",
+          "pond_rank": 1,
+          "area_m2": 8276.0,
+          "area_hectares": 0.8276,
+          "area_acres": 2.05,
+          "description": "Rainwater catchment watershed contributing runoff to the pond"
+        },
+        "geometry": {
+          "type": "MultiPolygon",
+          "coordinates": [
+            [
+              [
+                [81.295982, 21.253323],
+                [81.296001, 21.253323],
+                [81.296549, 21.252988],
+                [81.297196, 21.252987],
+                [81.296673, 21.251912],
+                [81.295982, 21.253323]
+              ]
+            ]
+          ]
+        }
+      },
+      {
+        "type": "Feature",
+        "properties": {
+          "feature_type": "farm_pond_site",
+          "pond_rank": 1,
+          "latitude": 21.251917,
+          "longitude": 81.296668,
+          "elevation_m": 270.0,
+          "slope_deg": 2.69,
+          "suitability_score": 0.8738,
+          "google_maps_url": "https://www.google.com/maps?q=21.251917,81.296668"
+        },
+        "geometry": {
+          "type": "Point",
+          "coordinates": [81.296668, 21.251917]
+        }
+      }
+    ]
+  }
+}
+\end{lstlisting}
+
+\newpage
+
+% ------------------------------------------------------------------------------
+% PAGE 5: API DOCUMENTATION
+% ------------------------------------------------------------------------------
+\section{API Documentation}
+
+\subsection{Endpoint Summary}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Method} & \textbf{Endpoint Route} & \textbf{Description} & \textbf{Auth} \\ \midrule
+\texttt{POST} & \texttt{/analyzeContour} & Analyzes contour map, computes DEM, finds ponds \& catchment & None \\
+\texttt{POST} & \texttt{/findCatchment}  & Alias for \texttt{/analyzeContour} & None \\
+\texttt{GET}  & \texttt{/health}         & Health check, server status, timestamp & None \\
+\texttt{GET}  & \texttt{/docs}           & Interactive Swagger UI documentation & None \\
+\texttt{GET}  & \texttt{/redoc}          & ReDoc interactive OpenAPI documentation & None \\ \bottomrule
+\end{tabular}
+\caption{Available API Endpoints}
+\end{table}
+
+\subsection{Request Parameters (\texttt{POST /analyzeContour})}
+
+\begin{table}[H]
+\centering
+\small
+\begin{tabular}{@{}lllll@{}}
+\toprule
+\textbf{Parameter Name} & \textbf{Type} & \textbf{In} & \textbf{Default} & \textbf{Description} \\ \midrule
+\texttt{contour\_map} & File & Form-Data & \textit{Required} & Uploaded \texttt{.kml} or \texttt{.kmz} contour file \\
+\texttt{resolution} & Float & Query & \texttt{1.0} & Grid resolution in meters ($0.5 \le r \le 10.0$) \\
+\texttt{top\_n} & Integer & Query & \texttt{5} & Number of candidate pond sites ($1 \le n \le 20$) \\
+\texttt{min\_separation\_meters} & Float & Query & \texttt{150.0} & Minimum distance between candidate sites \\
+\texttt{max\_slope\_degrees} & Float & Query & \texttt{8.0} & Maximum allowable pond terrain slope \\ \bottomrule
+\end{tabular}
+\caption{Request Parameters for \texttt{/analyzeContour}}
+\end{table}
+
+\subsection{Response Status Codes}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{\texttt{200 OK}}: Analysis succeeded. Returns comprehensive \texttt{ContourAnalysisResponse} JSON with terrain statistics, pond candidates, catchment metrics, and GeoJSON.
+    \item \textbf{\texttt{400 Bad Request}}: Missing file or unsupported file extension (accepts only \texttt{.kml} or \texttt{.kmz}).
+    \item \textbf{\texttt{422 Unprocessable Entity}}: Elevation data missing in contour placemarks or terrain processing error.
+    \item \textbf{\texttt{500 Internal Server Error}}: Unexpected server exception.
+\end{itemize}
+
+\subsection{Response Data Model Structure}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item \textbf{\texttt{file\_info}}: Filename, file size in bytes, total contour geometries parsed, total coordinate points.
+    \item \textbf{\texttt{coordinate\_system}}: Source CRS (\texttt{EPSG:4326}), metric target UTM projection (\texttt{EPSG:32644}), center coordinates, and bounding box.
+    \item \textbf{\texttt{terrain\_summary}}: DEM raster grid dimensions (rows, cols, cell count), elevation stats (min, max, mean, relief), slope distribution (\% flat, gentle, steep), and runoff accumulation metrics.
+    \item \textbf{\texttt{selected\_pond}}: Rank 1 optimal pond site with GPS coordinates, elevation, slope, flow accumulation, suitability score, and Google Maps URL.
+    \item \textbf{\texttt{pond\_candidates}}: Complete list of top $N$ non-overlapping candidate pond locations ranked by suitability.
+    \item \textbf{\texttt{primary\_catchment}}: Hydrological catchment basin metrics (area in $\text{m}^2$, hectares, acres, mean elevation, mean slope).
+    \item \textbf{\texttt{all\_catchments}}: Summary metrics for all top pond candidates.
+    \item \textbf{\texttt{geojson}}: Standard RFC 7946 GeoJSON FeatureCollection containing the delineated watershed polygon and pond location points for GIS visualization.
+\end{itemize}
+
+\end{document}
