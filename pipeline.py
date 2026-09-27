@@ -346,7 +346,7 @@ def calculate_flow_accumulation(dem: np.ndarray, flow_direction: np.ndarray, res
     valid_ds = downstream[downstream >= 0]
     np.add.at(in_degree, valid_ds, 1)
 
-    flow_acc_flat = np.ones(n_cells, dtype=np.float64)
+    flow_acc_flat = np.ones(n_cells, dtype=np.float32)
     queue = np.where(in_degree == 0)[0].tolist()
 
     q_idx = 0
@@ -360,28 +360,73 @@ def calculate_flow_accumulation(dem: np.ndarray, flow_direction: np.ndarray, res
             if in_degree[nxt] == 0:
                 queue.append(nxt)
 
-    return flow_acc_flat.reshape((rows, cols))
+    result = flow_acc_flat.reshape((rows, cols)).copy()
+    del flow_acc_flat, queue, in_degree, downstream, flat_fd, flat_r, flat_c
+    return result
 
 
 # --------------------------------------------------
 # 7. Multi-Criteria Pond Candidate Selection (from viz.ipynb)
 # --------------------------------------------------
+def compute_water_yield(
+    catchment_area_m2: float,
+    annual_rainfall_mm: float = 850.0,
+    runoff_coefficient: float = 0.35,
+    pond_depth_m: float = 3.0
+) -> Dict[str, Any]:
+    """
+    Computes expected runoff, harvestable water volume, and recommended farm pond dimensions.
+    Based on the Rational Method:
+    Gross Runoff Volume V_gross = Area (m2) * (Rainfall (mm) / 1000) * C (m3)
+    Harvestable Volume V_harvest = V_gross * 0.70 (accounting for absorption/evaporation/spillway)
+    Recommended Pond Capacity V_pond = 25% of annual harvestable runoff
+    Excavation Geometry: 2:1 length-to-width ratio, 1.5:1 side slope
+    """
+    gross_runoff_m3 = round(catchment_area_m2 * (annual_rainfall_mm / 1000.0) * runoff_coefficient, 2)
+    harvestable_m3 = round(gross_runoff_m3 * 0.70, 2)
+    harvestable_liters = round(harvestable_m3 * 1000.0, 1)
+
+    recommended_capacity_m3 = round(harvestable_m3 * 0.25, 2)
+    if recommended_capacity_m3 < 100.0 and harvestable_m3 > 0:
+        recommended_capacity_m3 = round(min(harvestable_m3, 100.0), 2)
+
+    surface_area_m2 = round(recommended_capacity_m3 / (pond_depth_m * 0.85), 2) if pond_depth_m > 0 else 0.0
+    width_m = round(math.sqrt(surface_area_m2 / 2.0), 1) if surface_area_m2 > 0 else 0.0
+    length_m = round(width_m * 2.0, 1)
+
+    return {
+        "annual_rainfall_mm": round(annual_rainfall_mm, 1),
+        "runoff_coefficient": round(runoff_coefficient, 2),
+        "gross_runoff_m3": round(gross_runoff_m3, 2),
+        "harvestable_volume_m3": round(harvestable_m3, 2),
+        "harvestable_volume_liters": round(harvestable_liters, 0),
+        "recommended_pond_capacity_m3": recommended_capacity_m3,
+        "recommended_depth_m": round(pond_depth_m, 1),
+        "recommended_top_width_m": width_m,
+        "recommended_top_length_m": length_m,
+        "recommended_surface_area_m2": surface_area_m2
+    }
+
+
 def find_top_ponds(
     dem: np.ndarray,
     slope_deg: np.ndarray,
     flow_acc: np.ndarray,
     grid_x: np.ndarray,
     grid_y: np.ndarray,
+    transformer: Transformer,
     transformer_inv: Transformer,
     top_n: int = 5,
     min_separation_meters: float = 150.0,
     max_slope_degrees: float = 8.0,
     min_flow_cells: float = 1000.0,
-    resolution: float = 1.0
+    resolution: float = 5.0,
+    bbox: Optional[Tuple[float, float, float, float]] = None
 ) -> List[Dict[str, Any]]:
     """
     Multi-criteria suitability scoring (AHP) and Spatial Non-Maximum Suppression (NMS)
     for identifying optimal pond candidates.
+    Supports land boundary (bbox) filtering for selecting sites within a user's land parcel.
     """
     rows, cols = dem.shape
     border = max(1, int(50 / resolution))
@@ -392,8 +437,28 @@ def find_top_ponds(
     else:
         valid_mask[:, :] = True
 
-    valid_mask &= (slope_deg <= max_slope_degrees)
-    valid_mask &= (flow_acc >= min_flow_cells)
+    # If land bounding box is provided (min_lat, min_lon, max_lat, max_lon)
+    if bbox is not None:
+        b_min_lat, b_min_lon, b_max_lat, b_max_lon = bbox
+        x1, y1 = transformer.transform(b_min_lon, b_min_lat)
+        x2, y2 = transformer.transform(b_max_lon, b_max_lat)
+        land_min_x, land_max_x = min(x1, x2), max(x1, x2)
+        land_min_y, land_max_y = min(y1, y2), max(y1, y2)
+
+        land_box_mask = (grid_x >= land_min_x) & (grid_x <= land_max_x) & (grid_y >= land_min_y) & (grid_y <= land_max_y)
+        if np.count_nonzero(land_box_mask) > 0:
+            parcel_valid = valid_mask & land_box_mask & (slope_deg <= max_slope_degrees) & (flow_acc >= min_flow_cells)
+            if np.count_nonzero(parcel_valid) == 0:
+                parcel_valid = land_box_mask & (slope_deg <= max_slope_degrees * 1.5)
+                if np.count_nonzero(parcel_valid) == 0:
+                    parcel_valid = land_box_mask
+            valid_mask = parcel_valid
+        else:
+            valid_mask &= (slope_deg <= max_slope_degrees)
+            valid_mask &= (flow_acc >= min_flow_cells)
+    else:
+        valid_mask &= (slope_deg <= max_slope_degrees)
+        valid_mask &= (flow_acc >= min_flow_cells)
 
     cand_r, cand_c = np.where(valid_mask)
     if len(cand_r) == 0:
@@ -466,37 +531,33 @@ def delineate_catchments_and_geojson(
     grid_x: np.ndarray,
     grid_y: np.ndarray,
     resolution: float,
-    transformer_inv: Transformer
+    transformer_inv: Transformer,
+    annual_rainfall_mm: float = 850.0,
+    runoff_coefficient: float = 0.35,
+    pond_depth_m: float = 3.0,
+    bbox: Optional[Tuple[float, float, float, float]] = None
 ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Any]]:
     """
-    Traces upstream catchment from pour point, calculates watershed metrics,
-    and converts the basin boundary into a standard WGS84 GeoJSON FeatureCollection.
+    Traces upstream catchment from pour point, calculates watershed metrics & water yield,
+    and converts the basin boundary and pond candidates into a standard WGS84 GeoJSON FeatureCollection.
     """
     rows, cols = dem.shape
-
-    # Build reverse upstream flow adjacency graph (from delineate_catchment.py)
-    upstream: Dict[Tuple[int, int], List[Tuple[int, int]]] = {}
-    for r in range(rows):
-        for c in range(cols):
-            d = flow_direction[r, c]
-            if d != -1:
-                dr, dc = DIRECTIONS[d]
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < rows and 0 <= nc < cols:
-                    if (nr, nc) not in upstream:
-                        upstream[(nr, nc)] = []
-                    upstream[(nr, nc)].append((r, c))
 
     def trace_catchment(pour_r: int, pour_c: int) -> np.ndarray:
         mask = np.zeros((rows, cols), dtype=bool)
         stack = [(pour_r, pour_c)]
+        mask[pour_r, pour_c] = True
         while stack:
-            curr_r, curr_c = stack.pop()
-            if mask[curr_r, curr_c]:
-                continue
-            mask[curr_r, curr_c] = True
-            for up_r, up_c in upstream.get((curr_r, curr_c), []):
-                stack.append((up_r, up_c))
+            cr, cc = stack.pop()
+            for dr, dc in DIRECTIONS:
+                nr, nc = cr + dr, cc + dc
+                if 0 <= nr < rows and 0 <= nc < cols and not mask[nr, nc]:
+                    d = flow_direction[nr, nc]
+                    if d != -1:
+                        ndr, ndc = DIRECTIONS[d]
+                        if nr + ndr == cr and nc + ndc == cc:
+                            mask[nr, nc] = True
+                            stack.append((nr, nc))
         return mask
 
     all_catchment_summaries = []
@@ -515,6 +576,13 @@ def delineate_catchments_and_geojson(
         elev_vals = dem[mask]
         slope_vals = slope_deg[mask]
 
+        water_yield = compute_water_yield(
+            catchment_area_m2=area_m2,
+            annual_rainfall_mm=annual_rainfall_mm,
+            runoff_coefficient=runoff_coefficient,
+            pond_depth_m=pond_depth_m
+        )
+
         catchment_summary = {
             "pond_rank": pond["rank"],
             "pond_location": {
@@ -529,7 +597,8 @@ def delineate_catchments_and_geojson(
             "elevation_min_m": round(float(elev_vals.min()), 2),
             "elevation_max_m": round(float(elev_vals.max()), 2),
             "elevation_mean_m": round(float(elev_vals.mean()), 2),
-            "slope_mean_deg": round(float(slope_vals.mean()), 2)
+            "slope_mean_deg": round(float(slope_vals.mean()), 2),
+            "water_yield": water_yield
         }
         all_catchment_summaries.append(catchment_summary)
 
@@ -543,6 +612,7 @@ def delineate_catchments_and_geojson(
                 for r, c in zip(c_rows, c_cols)
             ]
             poly_utm = unary_union(cell_boxes).buffer(0)
+            del cell_boxes
 
             def to_wgs84(geom):
                 if geom.geom_type == "Polygon":
@@ -555,44 +625,80 @@ def delineate_catchments_and_geojson(
 
             poly_wgs84 = to_wgs84(poly_utm)
 
+            geojson_features = []
+
+            # 1. User-selected land area boundary (if specified)
+            if bbox is not None:
+                b_min_lat, b_min_lon, b_max_lat, b_max_lon = bbox
+                geojson_features.append({
+                    "type": "Feature",
+                    "properties": {
+                        "feature_type": "selected_land_area",
+                        "description": "User-selected land parcel for farm pond placement"
+                    },
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [[
+                            [b_min_lon, b_min_lat],
+                            [b_max_lon, b_min_lat],
+                            [b_max_lon, b_max_lat],
+                            [b_min_lon, b_max_lat],
+                            [b_min_lon, b_min_lat]
+                        ]]
+                    }
+                })
+
+            # 2. Primary Catchment Basin Polygon
+            geojson_features.append({
+                "type": "Feature",
+                "properties": {
+                    "feature_type": "catchment_basin",
+                    "pond_rank": pond["rank"],
+                    "area_m2": round(area_m2, 2),
+                    "area_hectares": round(area_ha, 4),
+                    "area_acres": round(area_acres, 2),
+                    "annual_rainfall_mm": water_yield["annual_rainfall_mm"],
+                    "runoff_coefficient": water_yield["runoff_coefficient"],
+                    "gross_runoff_m3": water_yield["gross_runoff_m3"],
+                    "harvestable_volume_m3": water_yield["harvestable_volume_m3"],
+                    "harvestable_volume_liters": water_yield["harvestable_volume_liters"],
+                    "recommended_pond_capacity_m3": water_yield["recommended_pond_capacity_m3"],
+                    "description": "Rainwater catchment watershed contributing runoff to the pond"
+                },
+                "geometry": poly_wgs84
+            })
+
+            # 3. All Pond Candidates (Rank 1 as primary, Ranks 2..N as candidates)
+            for p in selected_ponds:
+                is_prim = (p["rank"] == 1)
+                geojson_features.append({
+                    "type": "Feature",
+                    "properties": {
+                        "feature_type": "farm_pond_site" if is_prim else "candidate_pond_site",
+                        "is_primary": is_prim,
+                        "pond_rank": p["rank"],
+                        "latitude": p["latitude"],
+                        "longitude": p["longitude"],
+                        "elevation_m": p["elevation_m"],
+                        "slope_deg": p["slope_deg"],
+                        "flow_accumulation_m2": p["flow_accumulation_m2"],
+                        "suitability_score": p["suitability_score"],
+                        "google_maps_url": p["google_maps_url"]
+                    },
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [p["longitude"], p["latitude"]]
+                    }
+                })
+
             primary_geojson = {
                 "type": "FeatureCollection",
-                "name": "Farm_Pond_Catchment_Delineation",
+                "name": "Village_Pond_Catchment_Planning",
                 "crs": {
                     "type": "name",
                     "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}
                 },
-                "features": [
-                    {
-                        "type": "Feature",
-                        "properties": {
-                            "feature_type": "catchment_basin",
-                            "pond_rank": pond["rank"],
-                            "area_m2": round(area_m2, 2),
-                            "area_hectares": round(area_ha, 4),
-                            "area_acres": round(area_acres, 2),
-                            "description": "Rainwater catchment watershed contributing runoff to the pond"
-                        },
-                        "geometry": poly_wgs84
-                    },
-                    {
-                        "type": "Feature",
-                        "properties": {
-                            "feature_type": "farm_pond_site",
-                            "pond_rank": pond["rank"],
-                            "latitude": pond["latitude"],
-                            "longitude": pond["longitude"],
-                            "elevation_m": pond["elevation_m"],
-                            "slope_deg": pond["slope_deg"],
-                            "suitability_score": pond["suitability_score"],
-                            "google_maps_url": pond["google_maps_url"]
-                        },
-                        "geometry": {
-                            "type": "Point",
-                            "coordinates": [pond["longitude"], pond["latitude"]]
-                        }
-                    }
-                ]
+                "features": geojson_features
             }
 
     return primary_catchment_info, all_catchment_summaries, primary_geojson
@@ -605,13 +711,32 @@ def run_contour_analysis_pipeline(
     file_bytes: bytes,
     filename: str,
     top_n: int = 5,
-    resolution: float = 1.0,
+    resolution: float = 5.0,
     min_separation_meters: float = 150.0,
-    max_slope_degrees: float = 8.0
+    max_slope_degrees: float = 8.0,
+    annual_rainfall_mm: float = 850.0,
+    runoff_coefficient: float = 0.35,
+    pond_depth_m: float = 3.0,
+    bbox_min_lat: Optional[float] = None,
+    bbox_min_lon: Optional[float] = None,
+    bbox_max_lat: Optional[float] = None,
+    bbox_max_lon: Optional[float] = None
 ) -> Dict[str, Any]:
     """
     Executes full end-to-end terrain and catchment analysis pipeline on uploaded KML/KMZ file.
+    Supports land boundary selection and hydrological water yield / pond sizing estimation.
     """
+    bbox = None
+    selected_land_bbox = None
+    if None not in (bbox_min_lat, bbox_min_lon, bbox_max_lat, bbox_max_lon):
+        bbox = (float(bbox_min_lat), float(bbox_min_lon), float(bbox_max_lat), float(bbox_max_lon))
+        selected_land_bbox = {
+            "min_lat": round(float(bbox_min_lat), 6),
+            "min_lon": round(float(bbox_min_lon), 6),
+            "max_lat": round(float(bbox_max_lat), 6),
+            "max_lon": round(float(bbox_max_lon), 6)
+        }
+
     # 1. Parse KML / KMZ
     t0 = time.time()
     contours = parse_kml_or_kmz(file_bytes, filename)
@@ -651,11 +776,13 @@ def run_contour_analysis_pipeline(
         flow_acc=flow_acc,
         grid_x=grid_x,
         grid_y=grid_y,
+        transformer=transformer,
         transformer_inv=transformer_inv,
         top_n=top_n,
         min_separation_meters=min_separation_meters,
         max_slope_degrees=max_slope_degrees,
-        resolution=resolution
+        resolution=resolution,
+        bbox=bbox
     )
     logger.info(f"[7/8] Found {len(top_ponds)} pond candidates in {time.time()-t0:.2f}s")
 
@@ -672,7 +799,11 @@ def run_contour_analysis_pipeline(
         grid_x=grid_x,
         grid_y=grid_y,
         resolution=resolution,
-        transformer_inv=transformer_inv
+        transformer_inv=transformer_inv,
+        annual_rainfall_mm=annual_rainfall_mm,
+        runoff_coefficient=runoff_coefficient,
+        pond_depth_m=pond_depth_m,
+        bbox=bbox
     )
     logger.info(f"[8/8] Catchment delineation & GeoJSON export done in {time.time()-t0:.2f}s")
 
@@ -719,6 +850,11 @@ def run_contour_analysis_pipeline(
 
     selected_pond = cleaned_top_ponds[0] if cleaned_top_ponds else None
 
+    # Explicit garbage collection to maintain lean memory footprint in constrained containers
+    import gc
+    del dem, slope_deg, flow_dir, flow_acc, grid_x, grid_y
+    gc.collect()
+
     return {
         "status": "success",
         "file_info": {
@@ -733,5 +869,7 @@ def run_contour_analysis_pipeline(
         "pond_candidates": cleaned_top_ponds,
         "primary_catchment": primary_catchment,
         "all_catchments": all_catchments,
+        "water_yield": primary_catchment.get("water_yield") if primary_catchment else None,
+        "selected_land_bbox": selected_land_bbox,
         "geojson": geojson_doc
     }

@@ -6,9 +6,14 @@ Can be executed with Python requests/httpx or tested using Postman/cURL.
 import os
 import json
 import time
-import httpx
+try:
+    import httpx
+    _USE_HTTPX = True
+except ImportError:
+    import requests
+    _USE_HTTPX = False
 
-API_URL = "http://localhost:8000/analyzeContour"
+API_URL = os.environ.get("API_URL", "http://10.1.75.51:3213/analyzeContour")
 KML_FILE = "contours_1m.kml"
 
 def run_demo():
@@ -26,12 +31,15 @@ def run_demo():
         }
         params = {
             "top_n": 5,
-            "resolution": 1.0,
+            "resolution": 5.0,
             "min_separation_meters": 150.0,
             "max_slope_degrees": 8.0
         }
         
-        response = httpx.post(API_URL, files=files, params=params, timeout=120.0)
+        if _USE_HTTPX:
+            response = httpx.post(API_URL, files=files, params=params, timeout=120.0)
+        else:
+            response = requests.post(API_URL, files=files, params=params, timeout=120.0)
 
     elapsed = time.time() - t0
     print(f"Response Status Code: {response.status_code} (took {elapsed:.2f}s)")
@@ -66,7 +74,16 @@ def run_demo():
         print(f"  • Basin Elevation: {catchment['elevation_min_m']}m to {catchment['elevation_max_m']}m (Mean: {catchment['elevation_mean_m']}m)")
         print(f"  • Basin Mean Slope: {catchment['slope_mean_deg']}°")
 
-        print(f"\n--- 5. Top {len(data['pond_candidates'])} Pond Candidates ---")
+        if data.get("water_yield"):
+            wy = data["water_yield"]
+            print("\n--- 5. Hydrological Water Yield & Pond Sizing ---")
+            print(f"  • Annual Rainfall : {wy['annual_rainfall_mm']} mm | Runoff Coeff (C): {wy['runoff_coefficient']}")
+            print(f"  • Gross Runoff    : {wy['gross_runoff_m3']:,.2f} m³")
+            print(f"  • Harvestable Vol : {wy['harvestable_volume_m3']:,.2f} m³ ({wy['harvestable_volume_liters']/1e6:.2f} Million Liters)")
+            print(f"  • Pond Storage    : {wy['recommended_pond_capacity_m3']:,.2f} m³ (Depth: {wy['recommended_depth_m']} m)")
+            print(f"  • Pond Dimensions : {wy['recommended_top_length_m']}m length × {wy['recommended_top_width_m']}m width (Surface: {wy['recommended_surface_area_m2']} m²)")
+
+        print(f"\n--- 6. Top {len(data['pond_candidates'])} Pond Candidates ---")
         for p in data['pond_candidates']:
             print(f"  [Rank #{p['rank']}] Score: {p['suitability_score']} | Elev: {p['elevation_m']}m | Slope: {p['slope_deg']}° | Flow Acc: {p['flow_accumulation_m2']:,.0f}m² | Lat: {p['latitude']}, Lon: {p['longitude']}")
 
