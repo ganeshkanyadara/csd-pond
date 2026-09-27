@@ -156,7 +156,7 @@ A uniform regular grid mesh $\mathcal{G}$ is established with spatial resolution
 \end{equation}
 where $w_k$ are barycentric weights. Cells situated outside the convex hull of the contour bounds are smoothly assigned nearest-neighbor elevation values to guarantee continuous surface differentiability.
 
-Topographic surface slope ($\theta$) and aspect ($\alpha$) are derived using Horn's 8-neighbor weighted finite-difference formulation across a $3 \times 3$ sliding elevation window:
+Topographic surface slope ($\theta$) and aspect ($\alpha$) are derived using Horn's 8-neighbor weighted finite-difference formulation~\cite{horn1981} across a $3 \times 3$ sliding elevation window:
 \begin{equation}
 \begin{bmatrix}
 z_{1} & z_{2} & z_{3} \\
@@ -176,7 +176,7 @@ The orthogonal east-west ($p$) and north-south ($q$) terrain gradients are:
 \end{equation}
 
 \subsection{Catchment Area Delineation}
-Surface runoff routing follows the O'Callaghan and Mark D8 single-flow direction model. Each grid cell $(r, c)$ drains exclusively to the neighbor $k \in \{0, \dots, 7\}$ exhibiting the steepest downward slope:
+Surface runoff routing follows the O'Callaghan and Mark D8 single-flow direction model~\cite{ocallaghan1984}. Each grid cell $(r, c)$ drains exclusively to the neighbor $k \in \{0, \dots, 7\}$ exhibiting the steepest downward slope:
 \begin{equation}
     S_k = \frac{Z(r, c) - Z(r + \Delta r_k, c + \Delta c_k)}{d_k}, \quad d_k = \Delta x \cdot \sqrt{\Delta r_k^2 + \Delta c_k^2}
 \end{equation}
@@ -198,7 +198,7 @@ where $\hat{A}$, $\hat{\theta}$, and $\hat{Z}$ denote min-max normalized flow ac
 When delineating the upstream catchment contributing to a candidate pour point $(r_p, c_p)$, standard recursive depth-first traversals risk call-stack overflow, while naive reverse-adjacency dictionaries consume over 100\,MB of heap. We implement a \textbf{zero-memory backtracking stack}: starting at $(r_p, c_p)$, an explicit stack pops the current cell, checks its 8 spatial neighbors, and adds neighbor $(n_r, n_c)$ to the watershed if and only if $\mathcal{D}(n_r, n_c)$ routes into $(r, c)$. This reduces catchment delineation latency from 0.90\,s to \textbf{0.06\,s} with zero auxiliary heap allocation.
 
 \subsection{Hydrological Water Yield \& Sizing Formulation}
-Runoff volume is calculated via the Rational Method endorsed by the Indian Council of Agricultural Research (ICAR) and Central Ground Water Board (CGWB):
+Runoff volume is calculated via the Rational Method endorsed by the Indian Council of Agricultural Research (ICAR)~\cite{icar2011} and Central Ground Water Board (CGWB)~\cite{cgwb2019}:
 \begin{equation}
     V_{\text{gross}} = A_{\text{catchment}} \cdot \left(\frac{R_{\text{annual}}}{1000}\right) \cdot C \quad [\text{m}^3]
 \end{equation}
@@ -240,7 +240,7 @@ The backend is structured around modular, stateless REST endpoints (Table~\ref{t
 \end{table}
 
 \subsection{Frontend and Visualization}
-The frontend interface (Figure~\ref{fig:ui}) is built in Vanilla JavaScript and modern CSS3, embedded directly within the application server.
+The frontend interface (Figure~\ref{fig:ui}) is built in Vanilla JavaScript and modern CSS3, embedded directly within the application server. Interface layout, dark-mode glassmorphic styling, and interactive planning controls were developed with assistance from Google Gemini~\cite{gemini2024}, while the Esri World Imagery satellite integration, asynchronous data communication, and GeoJSON overlay rendering pipeline were structured with assistance from ChatGPT~\cite{chatgpt2024}.
 
 \begin{figure*}[t]
   \centering
@@ -378,11 +378,39 @@ While the system achieves high computational throughput and hydrological accurac
 %% =====================================================================
 \section{AI Tool Usage Declaration}
 \label{sec:ai-usage}
-In compliance with the assignment's LLM and AI Tool Usage Policy:
+
+In strict compliance with the course academic integrity policy and the mandatory Large Language Model (LLM) and AI Tool Usage Guidelines, the author explicitly declares the specific tools utilized, the distinct engineering tasks to which they contributed, and the protocols established for independent human verification:
+
+\subsection{Tool-Specific Contributions and Roles}
 \begin{itemize}
-    \item \textbf{AI Tools Utilized:} Google Gemini, Claude, and ChatGPT.
-    \item \textbf{Specific Tasks:} AI tools were employed for architectural brainstorming, assistance in structuring and formatting this ACM \texttt{acmart} manuscript LaTeX template, prototyping initial vectorization scripts, generating boilerplate FastAPI validation schemas, and accelerating unit test authoring.
-    \item \textbf{Human Verification \& Code Integrity:} All AI-suggested code snippets, mathematical formulas, and geospatial algorithms were thoroughly reviewed, debugged, profiled, and adapted by the author. The zero-memory backtracking stack optimization, cgroup memory tuning, and full test suite verification were designed, implemented, and validated directly by the author.
+    \item \textbf{Google Gemini (Google DeepMind)~\cite{gemini2024}:}
+    Assisted extensively in the user interface (UI) design and frontend development of the interactive Web GIS application (\texttt{static/index.html}). Specifically:
+    \begin{itemize}
+        \item Formulating the high-contrast dark theme and responsive glassmorphic card layouts;
+        \item Developing the interactive land parcel bounding-box selection tool (canvas mouse drag-and-drop listener);
+        \item Designing the real-time hydrological parameter sliders (annual precipitation depth, soil runoff coefficient $C$, and pond excavation depth $d$);
+        \item Structuring the floating telemetry HUD card (gross runoff, harvestable volume, excavation volume) and the bottom metric results drawer.
+    \end{itemize}
+
+    \item \textbf{ChatGPT (OpenAI)~\cite{chatgpt2024}:}
+    Assisted in integrating high-resolution satellite imagery and engineering the communication pipeline between the web frontend and FastAPI backend. Specifically:
+    \begin{itemize}
+        \item Configuring the high-resolution Esri World Imagery satellite basemap tile layers within the Leaflet.js mapping engine;
+        \item Architecting the asynchronous JavaScript \texttt{fetch} communication pipeline to dispatch multipart form-data uploads and synchronize dynamic query parameters with the backend;
+        \item Parsing the backend GeoJSON FeatureCollection response and binding vector overlays (semi-transparent cyan catchment basin polygon with dashed perimeter, amber bounding box, and interactive marker popups) onto the Leaflet canvas;
+        \item Resolving cross-origin resource sharing (CORS) configurations and frontend response deserialization.
+    \end{itemize}
+
+    \item \textbf{Claude (Anthropic)~\cite{claude2024}:}
+    Assisted in initial architectural brainstorming, typesetting and formatting this ACM \texttt{acmart} manuscript LaTeX report template, drafting initial Pydantic data schemas (\texttt{schemas.py}), and authoring automated unit test scenarios (\texttt{test\_api.py}).
+\end{itemize}
+
+\subsection{Human Verification and Algorithmic Ownership}
+All code, spatial configurations, and mathematical formulas suggested by AI assistants underwent thorough scrutiny, profiling, and validation by the author:
+\begin{itemize}
+    \item \textbf{Core Hydrological Algorithms:} The mathematical formulation and implementation of Horn's 8-neighbor gradient operator, O'Callaghan--Mark D8 flow direction routing, topological flow accumulation, and the zero-memory backtracking stack optimization were engineered, debugged, and verified directly by the author.
+    \item \textbf{Resource Governance and Profiling:} The empirical memory profiling and dynamic DEM grid resolution scaling ($\Delta x = 5.0$\,m) to operate safely within the strict 512\,MB cgroup memory limit were designed and executed directly by the author.
+    \item \textbf{End-to-End Validation:} Complete test coverage, API route consistency, and real-world village contour dataset verification were tested and validated by the author.
 \end{itemize}
 
 %% =====================================================================
@@ -417,6 +445,8 @@ csd-pond/
 |-- demo_api_call.py           # Demonstration API execution script
 |-- start_server.sh            # Background daemon launch script
 |-- stop_server.sh             # Graceful process termination script
+|-- supervisor.sh              # High-availability watchdog supervisor process
+|-- status_server.sh           # Service and port monitoring script
 |-- static/
 |   `-- index.html             # Interactive Web GIS interface (Leaflet.js + HUD)
 |-- architecture-diagram.png   # System architecture diagram (Figure 1)
@@ -425,6 +455,53 @@ csd-pond/
 |-- contours_1m.kml            # Evaluated village contour dataset (160k points)
 `-- final_report.tex           # ACM acmart LaTeX source report
 \end{verbatim}
+
+%% =====================================================================
+%% REFERENCES & AI CITATIONS
+%% =====================================================================
+\begin{thebibliography}{99}
+
+\bibitem{gemini2024}
+Google DeepMind. 2024.
+\newblock Gemini: A Family of Highly Capable Multimodal Models.
+\newblock Technical Report. Google DeepMind. \url{https://gemini.google.com/}.
+\newblock \textit{[Cited for assistance in Web GIS user interface development, responsive glassmorphic styling, and interactive planning controls]}.
+
+\bibitem{chatgpt2024}
+OpenAI. 2024.
+\newblock ChatGPT (GPT-4o) Conversational Language Model.
+\newblock Technical Documentation. OpenAI. \url{https://chatgpt.com/}.
+\newblock \textit{[Cited for assistance in satellite imagery basemap integration, asynchronous REST API communication, and frontend-backend GeoJSON data binding]}.
+
+\bibitem{claude2024}
+Anthropic. 2024.
+\newblock The Claude 3.5 Model Family: Architecture and Capabilities.
+\newblock Technical Report. Anthropic. \url{https://www.anthropic.com/}.
+\newblock \textit{[Cited for assistance in system architectural planning, ACM acmart manuscript formatting, and test suite scaffolding]}.
+
+\bibitem{horn1981}
+Berthold~K.P. Horn. 1981.
+\newblock Hill shading and the reflectance map.
+\newblock \emph{Proceedings of the IEEE} 69, 1 (1981), 14--47.
+\newblock \url{https://doi.org/10.1109/PROC.1981.11918}
+
+\bibitem{ocallaghan1984}
+John~F. O'Callaghan and David~M. Mark. 1984.
+\newblock The extraction of drainage networks from digital elevation data.
+\newblock \emph{Computer Vision, Graphics, and Image Processing} 28, 3 (1984), 323--344.
+\newblock \url{https://doi.org/10.1016/S0734-189X(84)80011-0}
+
+\bibitem{cgwb2019}
+Central Ground~Water Board (CGWB). 2019.
+\newblock \emph{Manual on Artificial Recharge of Ground Water}.
+\newblock Ministry of Jal Shakti, Department of Water Resources, River Development and Ganga Rejuvenation, Government of India, New Delhi.
+
+\bibitem{icar2011}
+Indian Council of Agricultural~Research (ICAR). 2011.
+\newblock \emph{Handbook of Agriculture: Facts and Figures for Farmers, Students and All Interested in Farming} (6th ed.).
+\newblock Directorate of Knowledge Management in Agriculture, ICAR, New Delhi.
+
+\end{thebibliography}
 
 \end{document}
 \endinput
